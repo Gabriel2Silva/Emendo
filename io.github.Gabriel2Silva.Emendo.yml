@@ -1,0 +1,48 @@
+app-id: io.github.Gabriel2Silva.Emendo
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+command: emendo
+finish-args:
+  - --share=ipc
+  - --socket=session-bus
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Flatpak
+modules:
+  - name: emendo
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 emendo-launcher /app/bin/emendo
+      - install -Dm644 emendo.py /app/share/emendo/emendo.py
+      - install -Dm644 constants.py /app/share/emendo/constants.py
+      - install -Dm644 media_services.py /app/share/emendo/media_services.py
+      - install -Dm644 utils.py /app/share/emendo/utils.py
+      - install -Dm644 exceptions.py /app/share/emendo/exceptions.py
+      - install -Dm644 LICENSE /app/share/licenses/io.github.Gabriel2Silva.Emendo/LICENSE
+      - install -Dm644 io.github.Gabriel2Silva.Emendo.desktop /app/share/applications/io.github.Gabriel2Silva.Emendo.desktop
+      - install -Dm644 io.github.Gabriel2Silva.Emendo.metainfo.xml /app/share/metainfo/io.github.Gabriel2Silva.Emendo.metainfo.xml
+      - install -Dm644 io.github.Gabriel2Silva.Emendo.svg /app/share/icons/hicolor/scalable/apps/io.github.Gabriel2Silva.Emendo.svg
+    sources:
+      - type: file
+        path: flatpak/emendo-launcher
+      - type: file
+        path: emendo.py
+      - type: file
+        path: constants.py
+      - type: file
+        path: media_services.py
+      - type: file
+        path: utils.py
+      - type: file
+        path: exceptions.py
+      - type: file
+        path: LICENSE
+      - type: file
+        path: flatpak/io.github.Gabriel2Silva.Emendo.desktop
+      - type: file
+        path: flatpak/io.github.Gabriel2Silva.Emendo.metainfo.xml
+      - type: file
+        path: flatpak/io.github.Gabriel2Silva.Emendo.svg
