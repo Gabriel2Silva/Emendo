@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Gabriel2Silva.Emendo</id>
+  <name>Emendo</name>
+  <summary>Media Exporter</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>Media Exporter for trim, crop, and codec conversion workflows.</p>
+  </description>
+  <launchable type="desktop-id">io.github.Gabriel2Silva.Emendo.desktop</launchable>
+  <url type="homepage">https://github.com/Gabriel2Silva/Emendo</url>
+</component>

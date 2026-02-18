@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+export PYTHONPATH="/app/share/emendo${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 /app/share/emendo/emendo.py "$@"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Emendo
+Comment=Media Exporter
+Exec=emendo
+Icon=io.github.Gabriel2Silva.Emendo
+Categories=AudioVideo;Video;
+StartupNotify=true
+Terminal=false
