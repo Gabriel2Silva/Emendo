@@ -27,3 +27,6 @@ Run:
 ```
 python3 emendo.py
 ```
+_ēmendō_ (Latin, first conjugation)
+
+ “to free from faults, correct, improve, remedy, amend, revise, cure”
