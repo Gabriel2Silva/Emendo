@@ -11,7 +11,7 @@ Emendo is a lightweight GTK4/libadwaita video editor for Linux, with the main go
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
-This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.
+This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.  
 <img width="479" height="587" alt="Screenshot From 2026-02-18 14-41-13" src="https://github.com/user-attachments/assets/901240c6-f35b-47dc-bf3f-88546e6b5d79" />
 
 </div>
