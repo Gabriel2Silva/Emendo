@@ -1,27 +1,78 @@
 <div align="center">
-	
+
 # Emendo
 ![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)  
 ![Emendo Icon](flatpak/io.github.Gabriel2Silva.Emendo.svg)
 
 <sub>_ēmendō_ (Latin, first conjugation)</sub>  
-<sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>  
+<sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>
 
 Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
-This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.  
-<img width="479" height="587" alt="Screenshot From 2026-02-18 14-41-13" src="https://github.com/user-attachments/assets/901240c6-f35b-47dc-bf3f-88546e6b5d79" />
+This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.
+
+<img width="1356" height="878" alt="image" src="https://github.com/user-attachments/assets/fe82b2cb-d493-455b-ac4e-0cbf12d84ebb" />
+
 
 </div>
 
+## Why Emendo? There are numerous softwares that does the same.
+
+Gamers and content creators constantly record gameplay in long chunks - 1, 5, 10 minutes or more, just to save a 10 second clip. 
+
+Hardware encoded video is huge, and without a quick way to trim and re-encode, hard drives fill up fast with footage that will never be watched again.
+
+Emendo solves that. Open a video, set your in/out points, pick a preset and export, done.
+
+Tools like HandBrake are powerful but built around batch conversion workflows. They don't offer an interactive preview where you can visually drag to crop, scrub to set trim points, and immediately see what you're exporting. Emendo is built around that interactive experience from the ground up.
+
+It also tries to integrate well on a GNOME desktop, following the GNOME HIG for layout, controls and visual style.
+
+## Features
+
+- **Trim** — set start/end points with millisecond precision, with seekbar markers and keyboard shortcuts (`I`/`O`)
+- **Crop** — interactive drag-to-crop overlay directly on the video preview
+- **Re-encode** — full codec suite: H.264, HEVC (H.265), AV1, and GIF
+- **Audio track selection** — choose which tracks to include in the export, with per-track volume control and live preview switching
+- **Advanced controls** — override CRF and encoder preset per export
+- **GIF export** — palettegen/paletteuse pipeline for high-quality GIFs with configurable FPS and resolution
+- **Export progress** — real-time progress bar, encoding speed, ETA, CPU usage and temperature
+- **Keyboard shortcuts** — Space, I/O, arrow keys, Ctrl+O, Ctrl+E, frame-by-frame seek (`,`/`.`)
+- **Drag and drop** — drop a video file directly onto the window
+
+## Codec Presets
+
+Every preset produces output that is compatible with Discord embedding.
+Note that every single preset is customizable on-the-fly, so if you want to change CRF, preset or anything else, it's right there.
+
+| Preset | Container | Audio | Notes |
+|---|---|---|---|
+| Copy (no re-encode) | MP4/MKV/AVI | — | Lossless trim, instant |
+| H.264 Low/Baseline | MP4 | — | Maximum compatibility |
+| H.264 Medium | MP4 | — | Good balance |
+| H.264 Quality | MP4 | — | High quality, slower |
+| **H.264 Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
+| HEVC Low | MP4 | — | Smaller files than H.264 |
+| HEVC Medium | MP4 | — | |
+| HEVC Quality | MP4 | — | |
+| **HEVC Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
+| AV1 Low | MKV | Opus 128k | Best compression |
+| AV1 Medium | MKV | Opus 128k | |
+| AV1 Quality | MKV | Opus 128k | |
+| **AV1 Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
+| GIF | GIF | — | Configurable FPS and resolution |
+
+> [!NOTE]
+> The Discord presets automatically calculate the maximum video bitrate that fits within 8MB for your selected clip duration.
+
 ## Install (Flatpak Release)
 
-Download the latest `Emendo-*.flatpak` file in Releases, then run:
+Download the latest `Emendo-*.flatpak` file from [Releases](../../releases), then run:
 
 ```bash
-flatpak install --user ./Emendo-0.0.1.flatpak
+flatpak install --user ./Emendo-1.0.0.flatpak
 flatpak run io.github.Gabriel2Silva.Emendo
 ```
 
@@ -33,9 +84,8 @@ flatpak run io.github.Gabriel2Silva.Emendo
 Requirements:
 - Python 3
 - GTK4 / libadwaita Python bindings
+- GStreamer + gst-python
 - ffmpeg + ffprobe
-
-Run:
 
 ```bash
 python3 emendo.py
