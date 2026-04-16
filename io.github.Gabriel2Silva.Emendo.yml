@@ -1,6 +1,6 @@
 app-id: io.github.Gabriel2Silva.Emendo
 runtime: org.gnome.Platform
-runtime-version: "47"
+runtime-version: "50"
 sdk: org.gnome.Sdk
 command: emendo
 finish-args:
@@ -8,8 +8,10 @@ finish-args:
   - --socket=session-bus
   - --socket=wayland
   - --socket=fallback-x11
+  - --socket=pulseaudio
   - --device=dri
   - --filesystem=home
+  - --filesystem=xdg-run/gvfsd
   - --talk-name=org.freedesktop.Flatpak
 modules:
   - name: emendo
@@ -19,12 +21,14 @@ modules:
       - install -Dm644 emendo.py /app/share/emendo/emendo.py
       - install -Dm644 constants.py /app/share/emendo/constants.py
       - install -Dm644 media_services.py /app/share/emendo/media_services.py
+      - install -Dm644 gst_player.py /app/share/emendo/gst_player.py
       - install -Dm644 utils.py /app/share/emendo/utils.py
       - install -Dm644 exceptions.py /app/share/emendo/exceptions.py
       - install -Dm644 LICENSE /app/share/licenses/io.github.Gabriel2Silva.Emendo/LICENSE
       - install -Dm644 io.github.Gabriel2Silva.Emendo.desktop /app/share/applications/io.github.Gabriel2Silva.Emendo.desktop
       - install -Dm644 io.github.Gabriel2Silva.Emendo.metainfo.xml /app/share/metainfo/io.github.Gabriel2Silva.Emendo.metainfo.xml
       - install -Dm644 io.github.Gabriel2Silva.Emendo.svg /app/share/icons/hicolor/scalable/apps/io.github.Gabriel2Silva.Emendo.svg
+      - install -Dm644 io.github.Gabriel2Silva.Emendo.sidebar-toggle-symbolic.svg /app/share/icons/hicolor/symbolic/actions/io.github.Gabriel2Silva.Emendo.sidebar-toggle-symbolic.svg
     sources:
       - type: file
         path: flatpak/emendo-launcher
@@ -34,6 +38,8 @@ modules:
         path: constants.py
       - type: file
         path: media_services.py
+      - type: file
+        path: gst_player.py
       - type: file
         path: utils.py
       - type: file
@@ -46,3 +52,5 @@ modules:
         path: flatpak/io.github.Gabriel2Silva.Emendo.metainfo.xml
       - type: file
         path: flatpak/io.github.Gabriel2Silva.Emendo.svg
+      - type: file
+        path: flatpak/io.github.Gabriel2Silva.Emendo.sidebar-toggle-symbolic.svg

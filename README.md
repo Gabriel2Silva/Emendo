@@ -7,7 +7,7 @@
 <sub>_ēmendō_ (Latin, first conjugation)</sub>  
 <sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>  
 
-Emendo is a lightweight GTK4/libadwaita video editor for Linux, with the main goal of being blazing fast and no-nonsense.  
+Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
@@ -40,10 +40,3 @@ Run:
 ```bash
 python3 emendo.py
 ```
-
-## TODO
-
-- [ ] Fix audio playback (GStreamer isn't playing any audio)
-- [ ] Add many more encoding presets
-- [ ] Maybe separate CRF from the presets, allowing the user to manually select a CRF value (no idea how to do this)
-- [ ] Add verbose output when running through a terminal window

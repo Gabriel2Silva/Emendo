@@ -1,7 +1,6 @@
 # Utility functions for Emendo
 
 import logging
-import sys
 import gi
 
 try:
@@ -72,40 +71,14 @@ def hmsms_to_seconds(text: str) -> float:
     except Exception as e:
         raise ValueError(f"Invalid time format: {text}") from e
 
-# ---------------- Utility dialog wrappers ----------------
-
-def _show_info(parent, title, message, secondary_text=None):
-    try:
-        if hasattr(Adw, "MessageDialog"):
-            dlg = Adw.MessageDialog(transient_for=parent, modal=True,
-                                    heading=title, body=message)
-            if secondary_text:
-                dlg.set_body(secondary_text)
-            dlg.add_response("close", "Close")
-            dlg.connect("response", lambda d, r: d.destroy())
-            dlg.present()
-            return dlg
-    except Exception:
-        log.debug("Adw.MessageDialog unavailable; falling back to Gtk.MessageDialog")
-    dlg = Gtk.MessageDialog(
-        transient_for=parent,
-        modal=True,
-        buttons=Gtk.ButtonsType.CLOSE,
-        message_type=Gtk.MessageType.INFO,
-        text=title,
-        secondary_text=secondary_text or message
-    )
-    dlg.connect("response", lambda d, r: d.destroy())
-    dlg.present()
-    return dlg
-
 def _show_error(parent, title, message, secondary_text=None):
     try:
         if hasattr(Adw, "MessageDialog"):
-            dlg = Adw.MessageDialog(transient_for=parent, modal=True,
-                                    heading=title, body=message)
+            body = message
             if secondary_text:
-                dlg.set_body(secondary_text)
+                body = f"{message}\n\n{secondary_text}"
+            dlg = Adw.MessageDialog(transient_for=parent, modal=True,
+                                    heading=title, body=body)
             dlg.add_response("close", "Close")
             dlg.add_css_class("error")
             dlg.connect("response", lambda d, r: d.destroy())
@@ -124,4 +97,3 @@ def _show_error(parent, title, message, secondary_text=None):
     dlg.connect("response", lambda d, r: d.destroy())
     dlg.present()
     return dlg
-

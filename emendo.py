@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Emendo - Media Exporter (Optimized)
-# GNOME 49 / GTK4
+# Emendo - Media Exporter
+# GNOME / GTK4
 # Dependencies: python-gobject, gtk4, gstreamer (gst-python), ffmpeg, ffprobe, libadwaita
 
 import warnings
@@ -12,15 +12,57 @@ import logging
 import sys
 import re
 import os
+import signal
 import threading
 import datetime
 import time
 import json
-import shutil
-try:
-    import psutil
-except Exception:
-    psutil = None
+_STDERR_DROP_PATTERNS = ("vkAcquireNextImageKHR", "VK_SUBOPTIMAL_KHR")
+
+def _install_stderr_fd_filter():
+    """Filter known noisy native stderr lines (including C-level GDK output)."""
+    if getattr(_install_stderr_fd_filter, "_installed", False):
+        return
+    _install_stderr_fd_filter._installed = True
+
+    try:
+        read_fd, write_fd = os.pipe()
+        original_stderr_fd = os.dup(2)
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+    except Exception:
+        return
+
+    def _pump_stderr():
+        pending = ""
+        while True:
+            try:
+                chunk = os.read(read_fd, 4096)
+            except Exception:
+                break
+            if not chunk:
+                break
+            text = chunk.decode(errors="replace")
+            pending += text
+            lines = pending.splitlines(keepends=True)
+            pending = ""
+            if lines and not (lines[-1].endswith("\n") or lines[-1].endswith("\r")):
+                pending = lines.pop()
+            for line in lines:
+                if any(p in line for p in _STDERR_DROP_PATTERNS):
+                    continue
+                try:
+                    os.write(original_stderr_fd, line.encode())
+                except Exception:
+                    pass
+
+        if pending and not any(p in pending for p in _STDERR_DROP_PATTERNS):
+            try:
+                os.write(original_stderr_fd, pending.encode())
+            except Exception:
+                pass
+
+    threading.Thread(target=_pump_stderr, daemon=True).start()
 
 try:
     gi.require_version("Gtk", "4.0")
@@ -29,340 +71,42 @@ try:
 except Exception as e:
     print("[ERROR] Required GI versions could not be satisfied:", e, file=sys.stderr)
 
-from gi.repository import Gtk, Gst, Adw, Gdk, Graphene, GLib, Gio
-try:
-    import cairo
-except Exception:
-    cairo = None
+from gi.repository import Gtk, Gst, Adw, Gdk, Graphene, GLib, Gio, GObject, Pango
+
+from constants import (
+    CROP_MIN_SIZE, CROP_DEFAULT_X, CROP_DEFAULT_Y, CROP_DEFAULT_W, CROP_DEFAULT_H,
+    APP_ID, APP_NAME, DEFAULT_FPS, CROP_REDRAW_THROTTLE, RECT_CACHE_DURATION,
+    SYSTEM_METRICS_UPDATE_INTERVAL, CODEC_CHECK_TIMEOUT, FFPROBE_TIMEOUT, FFMPEG_PROGRESS_THROTTLE,
+    EXPORT_DIR, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, CODEC_CONFIGS, AUDIO_CONFIGS, AUDIO_CONTAINER_COMPAT, CONTAINER_EXTS, CONTAINER_NAMES
+)
+from exceptions import VideoLoadError
+from utils import seconds_to_hmsms, hmsms_to_seconds, _show_error
+from media_services import (
+    check_encoder_available,
+    probe_video_metadata,
+    probe_audio_tracks,
+    get_codec_info,
+    build_ffmpeg_command,
+    build_gif_command,
+    parse_ffmpeg_time_seconds,
+    format_elapsed_time,
+    get_cpu_temperature,
+    get_cpu_percent,
+    open_path_with_system,
+)
+from gst_player import GstPlayer
 
 try:
-    GLib.set_prgname("Emendo")
-    GLib.set_application_name("Emendo")
+    GLib.set_prgname(APP_NAME)
+    GLib.set_application_name(APP_NAME)
 except Exception:
     pass
 
-# Import from modules - add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-try:
-    from constants import (
-        CROP_MIN_SIZE, CROP_DEFAULT_X, CROP_DEFAULT_Y, CROP_DEFAULT_W, CROP_DEFAULT_H,
-        DEFAULT_FPS, CROP_REDRAW_THROTTLE, RECT_CACHE_DURATION, PROGRESS_UPDATE_INTERVAL,
-        SYSTEM_METRICS_UPDATE_INTERVAL, CODEC_CHECK_TIMEOUT, FFPROBE_TIMEOUT, FFMPEG_PROGRESS_THROTTLE,
-        EXPORT_DIR, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, CODEC_CONFIGS, AUDIO_CONFIGS, AUDIO_CONTAINER_COMPAT, CONTAINER_EXTS, CONTAINER_NAMES
-    )
-    from exceptions import EmendoError, VideoLoadError, MetadataError, ExportError, CodecError
-    from utils import seconds_to_hmsms, hmsms_to_seconds, _show_info, _show_error
-    from media_services import (
-        check_encoder_available,
-        probe_video_metadata,
-        get_codec_info,
-        build_ffmpeg_command,
-        parse_ffmpeg_time_seconds,
-    )
-except ImportError as e:
-    # Fallback if modules can't be imported
-    import logging
-    _log = logging.getLogger("Emendo")
-    _log.warning(f"Could not import modules: {e}, using inline definitions")
-    # Define constants inline as fallback
-    CROP_MIN_SIZE = 0.05
-    CROP_DEFAULT_X = 0.1
-    CROP_DEFAULT_Y = 0.1
-    CROP_DEFAULT_W = 0.8
-    CROP_DEFAULT_H = 0.8
-    DEFAULT_FPS = 60.0
-    CROP_REDRAW_THROTTLE = 1.0 / 60.0
-    RECT_CACHE_DURATION = 0.1
-    PROGRESS_UPDATE_INTERVAL = 0.1
-    SYSTEM_METRICS_UPDATE_INTERVAL = 0.5
-    CODEC_CHECK_TIMEOUT = 2
-    FFPROBE_TIMEOUT = 10
-    FFMPEG_PROGRESS_THROTTLE = 0.1
-    EXPORT_DIR = "Emendo"
-    DEFAULT_WINDOW_WIDTH = 1000
-    DEFAULT_WINDOW_HEIGHT = 700
-    CODEC_CONFIGS = {
-        0: {"name": "Copy (no re-encode)", "args": ["-c", "copy"], "encoder": None},
-        1: {"name": "H.264 Balanced", "args": ["-c:v", "libx264", "-crf", "20", "-preset", "medium"], "encoder": "libx264"},
-        2: {"name": "HEVC Balanced", "args": ["-c:v", "libx265", "-crf", "22", "-preset", "medium"], "encoder": "libx265"},
-        3: {"name": "AV1 (SVT preset 2)", "args": ["-c:v", "libsvtav1", "-preset", "2"], "encoder": "libsvtav1"},
-        4: {
-            "name": "H264/AAC (Discord-friendly)",
-            "args": [
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-crf", "20",
-                "-preset", "slow",
-                "-profile:v", "high",
-            ],
-            "encoder": "libx264",
-        },
-    }
-    AUDIO_CONFIGS = {
-        0: {"name": "AAC (192k)", "args": ["-c:a", "aac", "-b:a", "192k"]},
-        1: {"name": "AAC (128k)", "args": ["-c:a", "aac", "-b:a", "128k"]},
-        2: {"name": "MP3 (320k)", "args": ["-c:a", "libmp3lame", "-b:a", "320k"]},
-        3: {"name": "MP3 (256k)", "args": ["-c:a", "libmp3lame", "-b:a", "256k"]},
-        4: {"name": "MP3 (128k)", "args": ["-c:a", "libmp3lame", "-b:a", "128k"]},
-        5: {"name": "Opus (128k)", "args": ["-c:a", "libopus", "-b:a", "128k"]},
-        6: {"name": "Opus (96k)", "args": ["-c:a", "libopus", "-b:a", "96k"]},
-        7: {"name": "Vorbis (192k)", "args": ["-c:a", "libvorbis", "-b:a", "192k"]},
-        8: {"name": "FLAC (lvl 8)", "args": ["-c:a", "flac", "-compression_level", "8"]},
-    }
-    AUDIO_CONTAINER_COMPAT = {
-        0: {0, 1, 2},
-        1: {0, 1, 2},
-        2: {0, 1, 2},
-        3: {0, 1, 2},
-        4: {0, 1, 2},
-        5: {1},
-        6: {1},
-        7: {1},
-        8: {1},
-    }
-    CONTAINER_EXTS = {0: "mp4", 1: "mkv", 2: "avi"}
-    CONTAINER_NAMES = {0: "MP4", 1: "MKV", 2: "AVI"}
-    
-    class EmendoError(Exception):
-        pass
-    class VideoLoadError(EmendoError):
-        pass
-    class MetadataError(EmendoError):
-        pass
-    class ExportError(EmendoError):
-        pass
-    class CodecError(EmendoError):
-        pass
-    
-    def seconds_to_hmsms(seconds: float) -> str:
-        if seconds is None:
-            return "00:00:00.000"
-        try:
-            total_ms = int(round(seconds * 1000))
-            ms = total_ms % 1000
-            s = (total_ms // 1000) % 60
-            m = (total_ms // (1000 * 60)) % 60
-            h = total_ms // (1000 * 3600)
-            return f"{h:02}:{m:02}:{s:02}.{ms:03}"
-        except Exception:
-            return "00:00:00.000"
-    
-    def hmsms_to_seconds(text: str) -> float:
-        if not text or not text.strip():
-            raise ValueError("Empty time string")
-        text = text.strip()
-        parts = text.split(':')
-        try:
-            if len(parts) == 1:
-                s_part = parts[0]
-                if '.' in s_part:
-                    sec_str, ms_str = s_part.split('.', 1)
-                else:
-                    sec_str, ms_str = s_part, '0'
-                seconds = int(sec_str)
-                milliseconds = int((ms_str + '000')[:3])
-                return seconds + milliseconds / 1000.0
-            elif len(parts) == 2:
-                m_str, s_part = parts
-                if '.' in s_part:
-                    sec_str, ms_str = s_part.split('.', 1)
-                else:
-                    sec_str, ms_str = s_part, '0'
-                minutes = int(m_str)
-                seconds = int(sec_str)
-                milliseconds = int((ms_str + '000')[:3])
-                return minutes * 60 + seconds + milliseconds / 1000.0
-            elif len(parts) >= 3:
-                h_str = parts[0]
-                m_str = parts[1]
-                s_part = ":".join(parts[2:])
-                if '.' in s_part:
-                    sec_str, ms_str = s_part.split('.', 1)
-                else:
-                    sec_str, ms_str = s_part, '0'
-                hours = int(h_str)
-                minutes = int(m_str)
-                seconds = int(sec_str)
-                milliseconds = int((ms_str + '000')[:3])
-                return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
-            else:
-                raise ValueError("Unsupported time format")
-        except Exception as e:
-            raise ValueError(f"Invalid time format: {text}") from e
-    
-    def _show_info(parent, title, message, secondary_text=None):
-        try:
-            if hasattr(Adw, "MessageDialog"):
-                dlg = Adw.MessageDialog(transient_for=parent, modal=True, heading=title, body=message)
-                if secondary_text:
-                    dlg.set_body(secondary_text)
-                dlg.add_response("close", "Close")
-                dlg.connect("response", lambda d, r: d.destroy())
-                dlg.present()
-                return dlg
-        except Exception:
-            pass
-        dlg = Gtk.MessageDialog(transient_for=parent, modal=True, buttons=Gtk.ButtonsType.CLOSE,
-                               message_type=Gtk.MessageType.INFO, text=title, secondary_text=secondary_text or message)
-        dlg.connect("response", lambda d, r: d.destroy())
-        dlg.present()
-        return dlg
-    
-    def _show_error(parent, title, message, secondary_text=None):
-        try:
-            if hasattr(Adw, "MessageDialog"):
-                dlg = Adw.MessageDialog(transient_for=parent, modal=True, heading=title, body=message)
-                if secondary_text:
-                    dlg.set_body(secondary_text)
-                dlg.add_response("close", "Close")
-                dlg.add_css_class("error")
-                dlg.connect("response", lambda d, r: d.destroy())
-                dlg.present()
-                return dlg
-        except Exception:
-            pass
-        dlg = Gtk.MessageDialog(transient_for=parent, modal=True, buttons=Gtk.ButtonsType.CLOSE,
-                               message_type=Gtk.MessageType.ERROR, text=title, secondary_text=secondary_text or message)
-        dlg.connect("response", lambda d, r: d.destroy())
-        dlg.present()
-        return dlg
-
-    def check_encoder_available(encoder: str, timeout: int) -> bool:
-        def tool_cmd(tool: str):
-            if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
-                return ["flatpak-spawn", "--host", tool]
-            return [tool]
-        result = subprocess.run(
-            tool_cmd("ffmpeg") + ["-hide_banner", "-encoders"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return encoder in result.stdout
-
-    def probe_video_metadata(path: str, default_fps: float, timeout: int):
-        def tool_cmd(tool: str):
-            if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
-                return ["flatpak-spawn", "--host", tool]
-            return [tool]
-        result = subprocess.run(
-            tool_cmd("ffprobe") + [
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration:stream=width,height,r_frame_rate",
-                "-select_streams",
-                "v:0",
-                "-of",
-                "json",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
-
-        data = json.loads(result.stdout)
-
-        duration = None
-        width = None
-        height = None
-        fps = default_fps
-
-        if "format" in data and "duration" in data["format"]:
-            try:
-                duration = float(data["format"]["duration"])
-            except (TypeError, ValueError):
-                duration = None
-
-        if "streams" in data and data["streams"]:
-            stream = data["streams"][0]
-            if "width" in stream:
-                width = int(stream["width"])
-            if "height" in stream:
-                height = int(stream["height"])
-            if "r_frame_rate" in stream:
-                try:
-                    num, den = map(int, stream["r_frame_rate"].split("/"))
-                    if den > 0:
-                        fps = num / den
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
-
-        return duration, width, height, fps
-
-    def get_codec_info(filepath: str):
-        def tool_cmd(tool: str):
-            if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
-                return ["flatpak-spawn", "--host", tool]
-            return [tool]
-        result = subprocess.run(
-            tool_cmd("ffprobe") + [
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                filepath,
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode == 0 and result.stdout:
-            lines = result.stdout.strip().split("\n")
-            video_codec = lines[0] if len(lines) > 0 else "unknown"
-            audio_codec = lines[1] if len(lines) > 1 else "unknown"
-            return video_codec, audio_codec
-
-        return "unknown", "unknown"
-
-    def build_ffmpeg_command(filepath: str, start: float, end: float, codec_args, crop_filter, output_path: str):
-        def tool_cmd(tool: str):
-            if os.environ.get("FLATPAK_ID") and shutil.which("flatpak-spawn"):
-                return ["flatpak-spawn", "--host", tool]
-            return [tool]
-        cmd = tool_cmd("ffmpeg") + [
-            "-y",
-            "-ss",
-            f"{start:.3f}",
-            "-to",
-            f"{end:.3f}",
-            "-i",
-            filepath,
-        ]
-        if crop_filter:
-            cmd.extend(["-vf", crop_filter])
-        cmd.extend(codec_args)
-        has_audio_setting = "-c:a" in codec_args or "-an" in codec_args
-        if not has_audio_setting:
-            for i in range(len(codec_args) - 1):
-                if codec_args[i] == "-c" and codec_args[i + 1] == "copy":
-                    has_audio_setting = True
-                    break
-        if not has_audio_setting:
-            cmd.extend(["-c:a", "copy"])
-        cmd.append(output_path)
-        return cmd
-
-    def parse_ffmpeg_time_seconds(line: str, parse_time_fn):
-        match = re.search(r"time=(\d+:\d+:\d+\.?\d*)", line)
-        if not match:
-            return None
-        try:
-            return parse_time_fn(match.group(1))
-        except Exception:
-            return None
-
 # ---------------- Silence specific GDK/Vulkan warning ----------------
-def _gdk_log_handler(domain, level, message):
+def _gdk_log_handler(domain, level, message, user_data=None):
     try:
-        if "vkAcquireNextImageKHR" in message:
+        msg = str(message or "")
+        if "vkAcquireNextImageKHR" in msg or "VK_SUBOPTIMAL_KHR" in msg:
             return
     except Exception:
         pass
@@ -373,6 +117,11 @@ def _gdk_log_handler(domain, level, message):
 
 try:
     GLib.log_set_handler("Gdk",
+                         GLib.LogLevelFlags.LEVEL_WARNING | GLib.LogLevelFlags.LEVEL_ERROR | GLib.LogLevelFlags.LEVEL_CRITICAL,
+                         _gdk_log_handler)
+    # Some builds route this warning through generic domains; keep Vulkan enabled,
+    # but suppress only the known noisy swapchain warning pattern.
+    GLib.log_set_handler(None,
                          GLib.LogLevelFlags.LEVEL_WARNING | GLib.LogLevelFlags.LEVEL_ERROR | GLib.LogLevelFlags.LEVEL_CRITICAL,
                          _gdk_log_handler)
 except Exception:
@@ -415,7 +164,6 @@ class CropOverlay(Gtk.Widget):
         self._cached_rect = None
         self._last_rect_calc = 0.0
         self._is_visible = False  # Start as False, will be set by do_map
-        self._cairo_surface = None
 
         gesture = Gtk.GestureDrag.new()
         gesture.connect("drag-begin", self.on_drag_begin)
@@ -533,21 +281,11 @@ class CropOverlay(Gtk.Widget):
         crop_h = self.crop_h * disp_h
         
         # Create rectangles for drawing
-        full_rect = Graphene.Rect().init(0, 0, width, height)
         crop_rect = Graphene.Rect().init(crop_x, crop_y, crop_w, crop_h)
         
-        # Draw dark overlay covering entire widget
+        # Draw dark overlay around the crop region (4 rectangles)
         dark_color = Gdk.RGBA()
         dark_color.parse("rgba(0, 0, 0, 0.75)")
-        snapshot.append_color(dark_color, full_rect)
-        
-        # Clear the crop area (make it transparent)
-        # We do this by drawing the crop area with CLEAR blend mode
-        # Since GTK4 doesn't have direct CLEAR, we'll use a different approach:
-        # Draw a white rectangle and then use a mask, or draw the overlay in parts
-        
-        # Alternative: Draw overlay in 4 parts around the crop area
-        # Top
         if crop_y > 0:
             top_rect = Graphene.Rect().init(0, 0, width, crop_y)
             snapshot.append_color(dark_color, top_rect)
@@ -756,15 +494,88 @@ class CropOverlay(Gtk.Widget):
 
 class EmendoApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.emendo.Emendo")
-        self.process_thread = None
+        super().__init__(application_id=APP_ID)
         self._ffmpeg_process = None
         self._export_cancel_requested = False
         self.video_fps = DEFAULT_FPS
         self._loading_spinner = None
-        self._metadata_loading_thread = None
         self._metadata_request_id = 0
         self._audio_codec_availability = {}
+        self._user_is_seeking = False
+        self._fallback_audio_tracks = []
+        self._player_error_dialog_open = False
+        self._last_player_error_message = None
+        self._last_player_error_time = 0.0
+
+    def _prepare_local_icon_theme(self, theme):
+        if getattr(self, "_local_icon_theme_prepared", False):
+            return
+        self._local_icon_theme_prepared = True
+
+        local_icons_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flatpak")
+        if not os.path.isdir(local_icons_dir) or theme is None:
+            return
+
+        try:
+            if hasattr(theme, "add_search_path"):
+                theme.add_search_path(local_icons_dir)
+            elif hasattr(theme, "append_search_path"):
+                theme.append_search_path(local_icons_dir)
+            log.info(f"Added local icon search path: {local_icons_dir}")
+        except Exception as e:
+            log.warning(f"Failed to add local icon search path: {e}")
+
+    def _set_sidebar_toggle_button_icon(self, button):
+        custom_icon_name = "io.github.Gabriel2Silva.Emendo.sidebar-toggle-symbolic"
+
+        theme_icon_names = (
+            custom_icon_name,
+            "sidebar-show-symbolic-rtl",
+            "sidebar-show-right-symbolic",
+            "sidebar-show-symbolic",
+            "view-sidebar-symbolic",
+            "open-menu-symbolic",
+        )
+        try:
+            display = Gdk.Display.get_default()
+            theme = Gtk.IconTheme.get_for_display(display) if display else None
+        except Exception:
+            theme = None
+
+        self._prepare_local_icon_theme(theme)
+
+        if theme:
+            for icon_name in theme_icon_names:
+                try:
+                    if theme.has_icon(icon_name):
+                        button.set_icon_name(icon_name)
+                        return
+                except Exception:
+                    continue
+
+        # Last-resort fallback: text-only button, avoids broken-placeholder icon.
+        button.set_label("Sidebar")
+
+    def _set_button_symbolic_icon_with_fallback(self, button, icon_names, fallback_label=None):
+        try:
+            display = Gdk.Display.get_default()
+            theme = Gtk.IconTheme.get_for_display(display) if display else None
+        except Exception:
+            theme = None
+
+        self._prepare_local_icon_theme(theme)
+
+        if theme:
+            for icon_name in icon_names:
+                try:
+                    if theme.has_icon(icon_name):
+                        button.set_icon_name(icon_name)
+                        return
+                except Exception:
+                    continue
+
+        if fallback_label:
+            button.set_label(fallback_label)
 
     def _create_seek_button(self, label, tooltip, delta, icon=None):
         """Create a seek button with specified delta"""
@@ -789,52 +600,29 @@ class EmendoApp(Adw.Application):
         try:
             frame_delta = direction / self.video_fps
             self._seek_delta(frame_delta)
-        except Exception:
+        except (TypeError, ZeroDivisionError):
             # Fallback to default FPS if video FPS not available
             self._seek_delta(direction / DEFAULT_FPS)
 
     def on_play_pause(self, button):
         """Toggle play/pause state."""
-        if not hasattr(self, 'video') or not self.video:
-            _show_error(self.win, "Playback Error", 
-                       "Video widget is not initialized.\n\nPlease open a video file first.")
-            return
-        
         if not self.filepath:
             _show_error(self.win, "Playback Error", 
                        "No video file loaded.\n\nPlease open a video file first.")
             return
         
-        try:
-            # Get media stream - Gtk.Video uses Gtk.MediaStream for playback control
-            stream = self.video.get_media_stream()
-            if not stream:
-                _show_error(self.win, "Playback Error", 
-                           "Video stream is not ready.\n\nPlease wait for the video to finish loading.")
-                return
-            
-            if self._is_playing:
-                # Pause - use media stream's pause method
-                stream.pause()
-                self._is_playing = False
-                self.btn_play_pause.set_child(
-                    self._create_button_content("media-playback-start-symbolic", "Play")
-                )
-            else:
-                # Play - use media stream's play method
-                stream.play()
-                self._is_playing = True
-                self.btn_play_pause.set_child(
-                    self._create_button_content("media-playback-pause-symbolic", "Pause")
-                )
-        except AttributeError as e:
-            log.warning(f"Media stream not available: {e}")
-            _show_error(self.win, "Playback Error", 
-                       "Video stream is not ready.\n\nPlease wait for the video to finish loading.")
-        except Exception as e:
-            log.exception("Failed to toggle play/pause")
-            _show_error(self.win, "Playback Error", 
-                       f"Failed to control playback:\n{str(e)}")
+        if self._is_playing:
+            self.player.pause()
+        else:
+            # Match common player behavior: Play at EOS restarts from beginning.
+            try:
+                if self.duration is not None:
+                    pos = self.player.get_position()
+                    if pos >= max(0.0, self.duration - 0.05):
+                        self.player.seek(0.0)
+            except Exception:
+                log.warning("Failed EOS restart seek; attempting normal play")
+            self.player.play()
 
     def do_activate(self):
         log.info("Activating application")
@@ -845,12 +633,13 @@ class EmendoApp(Adw.Application):
             return
 
         self.win = Adw.ApplicationWindow(application=self)
-        self.win.set_title("Emendo")
+        self.win.set_title(APP_NAME)
         self.win.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        self.win.connect("close-request", self._on_close_request)
 
         header = Adw.HeaderBar()
         header_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        header_box.append(Gtk.Label(label="Emendo", css_classes=["title"]))
+        header_box.append(Gtk.Label(label=APP_NAME, css_classes=["title"]))
         header_box.append(Gtk.Label(label="Media Exporter", css_classes=["subtitle"]))
         header.set_title_widget(header_box)
 
@@ -868,40 +657,77 @@ class EmendoApp(Adw.Application):
         menu_button.add_css_class("flat")
         header.pack_end(menu_button)
 
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        main_box.set_margin_top(12)
-        main_box.set_margin_bottom(12)
-        main_box.set_margin_start(12)
-        main_box.set_margin_end(12)
-        # Make layout responsive
-        main_box.set_hexpand(True)
-        main_box.set_vexpand(True)
-        self.main_box = main_box  # Store reference for loading overlay
+        # Toggle Sidebar Button
+        self.btn_toggle_sidebar = Gtk.ToggleButton()
+        self._set_sidebar_toggle_button_icon(self.btn_toggle_sidebar)
+        self.btn_toggle_sidebar.set_tooltip_text("Toggle Sidebar")
+        self.btn_toggle_sidebar.set_active(True)
+        self.btn_toggle_sidebar.add_css_class("flat")
+        header.pack_end(self.btn_toggle_sidebar)
+
+        # Create Main Flap Container
+        self.flap = Adw.Flap()
+        self.flap.set_fold_policy(Adw.FlapFoldPolicy.NEVER)
+        self.flap.set_flap_position(Gtk.PackType.END)
+        self.flap.set_locked(True) # Only toggle via button
+
+        # Bind toggle button to reveal_flap
+        self.flap.bind_property("reveal-flap", self.btn_toggle_sidebar, "active",
+                               GObject.BindingFlags.BIDIRECTIONAL | GObject.BindingFlags.SYNC_CREATE)
 
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(header)
-        toolbar_view.set_content(main_box)
+        toolbar_view.set_content(self.flap)
 
         self.win.set_content(toolbar_view)
+
+        # --- Left Panel (Content): Video & Playback Controls ---
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        left_box.set_hexpand(True)
+        left_box.set_vexpand(True)
+        left_box.set_margin_top(12)
+        left_box.set_margin_bottom(12)
+        left_box.set_margin_start(12)
+        left_box.set_margin_end(12)
+
+        # Add separator to right of content to delineate from flap
+        content_wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        content_wrapper.append(left_box)
+        content_wrapper.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
+        self.flap.set_content(content_wrapper)
 
         # Video display area
         self.video_overlay = Gtk.Overlay()
         self.video_overlay.set_hexpand(True)
         self.video_overlay.set_vexpand(True)
-        # Make video area responsive with minimum size
         self.video_overlay.set_size_request(400, 300)
 
-        self.video = Gtk.Video()
-        self.video.set_hexpand(True)
-        self.video.set_vexpand(True)
-        self.video.add_css_class("card")
+        self.player = GstPlayer()
+        self.player.connect("position-changed", self._on_player_position_changed)
+        self.player.connect("duration-changed", self._on_player_duration_changed)
+        self.player.connect("state-changed", self._on_player_state_changed)
+        self.player.connect("eos", self._on_player_eos)
+        self.player.connect("error", self._on_player_error)
+        self.player.connect("audio-tracks-changed", self._on_audio_tracks_changed)
+
+        self.video_picture = Gtk.Picture()
+        self.video_picture.set_hexpand(True)
+        self.video_picture.set_vexpand(True)
+        self.video_picture.add_css_class("card")
+
+        paintable = self.player.get_paintable()
+        if paintable:
+            self.video_picture.set_paintable(paintable)
+        else:
+            log.warning("No paintable available from GstPlayer")
 
         self.crop_overlay = CropOverlay()
 
-        self.video_overlay.set_child(self.video)
+        self.video_overlay.set_child(self.video_picture)
         self.video_overlay.add_overlay(self.crop_overlay)
 
-        main_box.append(self.video_overlay)
+        left_box.append(self.video_overlay)
 
         drop = Gtk.DropTarget.new(Gio.File, Gdk.DragAction.COPY)
         drop.connect("drop", self.on_drop_file)
@@ -912,9 +738,8 @@ class EmendoApp(Adw.Application):
         controls.set_halign(Gtk.Align.CENTER)
         controls.set_margin_top(6)
         controls.set_margin_bottom(6)
-        # Make controls wrap on smaller screens
         controls.set_homogeneous(False)
-        main_box.append(controls)
+        left_box.append(controls)
 
         btn_restart = Gtk.Button()
         btn_restart.set_child(self._create_button_content("media-skip-backward-symbolic", "Start"))
@@ -951,11 +776,63 @@ class EmendoApp(Adw.Application):
                   self.btn_play_pause, btn_forward_frame, btn_forward_1, btn_forward_3, btn_forward_5, btn_end]:
             controls.append(b)
 
+        # Seekbar and Time Label
+        seek_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        seek_box.set_margin_top(6)
+        seek_box.set_margin_bottom(12)
+        seek_box.set_margin_start(12)
+        seek_box.set_margin_end(12)
+
+        self.seek_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
+        self.seek_scale.set_hexpand(True)
+        self.seek_scale.set_digits(0) # Display seconds for now in value popup?
+        self.seek_scale.set_draw_value(False)
+        self.seek_scale.set_range(0, 0) # Initially 0-0
+
+        # Gesture to detect start/end of drag
+        seek_gesture = Gtk.GestureDrag.new()
+        seek_gesture.connect("drag-begin", self._on_seek_drag_begin)
+        seek_gesture.connect("drag-end", self._on_seek_drag_end)
+        self.seek_scale.add_controller(seek_gesture)
+
+        self.seek_scale.connect("change-value", self._on_seek_change_value)
+
+        self.time_label = Gtk.Label(label="00:00.000 / 00:00.000")
+        self.time_label.add_css_class("numeric")
+
+        seek_box.append(self.seek_scale)
+        seek_box.append(self.time_label)
+
+        left_box.append(seek_box)
+
+        # --- Right Panel (Flap): Settings Sidebar ---
+        self.right_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.right_panel.set_size_request(380, -1)
+        self.right_panel.set_hexpand(False)
+        self.right_panel.add_css_class("background") # Ensure visible background
+
+        # Flap requires the widget to be set directly
+        self.flap.set_flap(self.right_panel)
+
+        # ScrolledWindow for Settings
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_vexpand(True)
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        # Settings Box (inside ScrolledWindow)
+        settings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_box.set_margin_start(12)
+        settings_box.set_margin_end(12)
+        settings_box.set_margin_bottom(12)
+        settings_box.set_margin_top(12)
+
+        scrolled.set_child(settings_box)
+        self.right_panel.append(scrolled)
+
         # Trim time controls in a preferences group
         trim_group = Adw.PreferencesGroup()
         trim_group.set_title("Trim Range")
-        trim_group.set_margin_top(6)
-        main_box.append(trim_group)
+        settings_box.append(trim_group)
 
         # Start time row
         start_row = Adw.ActionRow()
@@ -965,7 +842,13 @@ class EmendoApp(Adw.Application):
         self.start_entry.set_placeholder_text("HH:MM:SS.mmm")
         self.start_entry.set_valign(Gtk.Align.CENTER)
         self.start_entry.set_width_chars(16)
-        btn_set_start = Gtk.Button(icon_name="list-add-symbolic")
+        self.start_entry.connect("changed", lambda _: self._update_trim_markers())
+        btn_set_start = Gtk.Button()
+        self._set_button_symbolic_icon_with_fallback(
+            btn_set_start,
+            ("edit-cut-symbolic", "edit-cut", "list-add-symbolic"),
+            fallback_label="Set",
+        )
         btn_set_start.set_valign(Gtk.Align.CENTER)
         btn_set_start.set_tooltip_text("Set start to current position\nKeyboard: I")
         btn_set_start.add_css_class("flat")
@@ -984,7 +867,13 @@ class EmendoApp(Adw.Application):
         self.end_entry.set_placeholder_text("HH:MM:SS.mmm")
         self.end_entry.set_valign(Gtk.Align.CENTER)
         self.end_entry.set_width_chars(16)
-        btn_set_end = Gtk.Button(icon_name="list-add-symbolic")
+        self.end_entry.connect("changed", lambda _: self._update_trim_markers())
+        btn_set_end = Gtk.Button()
+        self._set_button_symbolic_icon_with_fallback(
+            btn_set_end,
+            ("edit-cut-symbolic", "edit-cut", "list-add-symbolic"),
+            fallback_label="Set",
+        )
         btn_set_end.set_valign(Gtk.Align.CENTER)
         btn_set_end.set_tooltip_text("Set end to current position\nKeyboard: O")
         btn_set_end.add_css_class("flat")
@@ -995,11 +884,16 @@ class EmendoApp(Adw.Application):
         end_row.add_suffix(end_suffix)
         trim_group.add(end_row)
 
+        # Audio Tracks group (Moved up as requested)
+        audio_tracks_group = self._create_audio_tracks_ui()
+        self.audio_tracks_group = audio_tracks_group
+        settings_box.append(audio_tracks_group)
+
         # Crop controls in preferences group
         crop_group = Adw.PreferencesGroup()
         crop_group.set_title("Crop")
         crop_group.set_margin_top(6)
-        main_box.append(crop_group)
+        settings_box.append(crop_group)
 
         crop_row = Adw.ActionRow()
         crop_row.set_title("Enable Crop")
@@ -1015,7 +909,7 @@ class EmendoApp(Adw.Application):
         export_group = Adw.PreferencesGroup()
         export_group.set_title("Export Settings")
         export_group.set_margin_top(6)
-        main_box.append(export_group)
+        settings_box.append(export_group)
 
         # Codec row
         codec_row = Adw.ComboRow()
@@ -1051,37 +945,91 @@ class EmendoApp(Adw.Application):
         self.audio_combo = audio_row
         export_group.add(audio_row)
 
-        transform_row = Adw.ActionRow()
-        transform_row.set_title("Output Transform")
-        transform_row.set_subtitle("Optional FPS and resolution")
+        # Video CRF row
+        self.crf_entry = Adw.EntryRow()
+        self.crf_entry.set_title("Video CRF")
+        if hasattr(self.crf_entry, "set_placeholder_text"):
+            self.crf_entry.set_placeholder_text("From preset")
+        if hasattr(self.crf_entry, "set_show_apply_button"):
+            self.crf_entry.set_show_apply_button(False)
+        export_group.add(self.crf_entry)
+
+        # Video encoder preset row
+        self.video_preset_combo = Adw.ComboRow()
+        self.video_preset_combo.set_title("Video Preset")
+        self.video_preset_combo.set_subtitle("Encoder speed/quality preset")
+        self.video_preset_combo.set_model(self._make_string_list(["medium"]))
+        self.video_preset_combo.set_selected(0)
+        export_group.add(self.video_preset_combo)
+        log.info("Advanced video controls enabled: CRF and preset rows added")
+
+        # Output Transform Settings
+        # Create separate rows for better readability
+
+        # FPS Row
+        self.fps_row = Adw.ActionRow()
+        self.fps_row.set_title("Frame Rate")
+        self.fps_row.set_subtitle("Target FPS (e.g. 60)")
         self.fps_entry = Gtk.Entry()
-        self.fps_entry.set_placeholder_text("e.g. 60")
+        self.fps_entry.set_placeholder_text("Default")
         self.fps_entry.set_valign(Gtk.Align.CENTER)
-        self.fps_entry.set_width_chars(6)
+        self.fps_entry.set_width_chars(10)
+        self.fps_row.add_suffix(self.fps_entry)
+        export_group.add(self.fps_row)
+
+        # Width Row
+        self.width_row = Adw.ActionRow()
+        self.width_row.set_title("Width")
+        self.width_row.set_subtitle("Output Width (px)")
         self.width_entry = Gtk.Entry()
-        self.width_entry.set_placeholder_text("W")
+        self.width_entry.set_placeholder_text("Default")
         self.width_entry.set_valign(Gtk.Align.CENTER)
-        self.width_entry.set_width_chars(6)
+        self.width_entry.set_width_chars(10)
+        self.width_row.add_suffix(self.width_entry)
+        export_group.add(self.width_row)
+
+        # Height Row
+        self.height_row = Adw.ActionRow()
+        self.height_row.set_title("Height")
+        self.height_row.set_subtitle("Output Height (px)")
         self.height_entry = Gtk.Entry()
-        self.height_entry.set_placeholder_text("H")
+        self.height_entry.set_placeholder_text("Default")
         self.height_entry.set_valign(Gtk.Align.CENTER)
-        self.height_entry.set_width_chars(6)
-        transform_suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        transform_suffix.append(Gtk.Label(label="FPS"))
-        transform_suffix.append(self.fps_entry)
-        transform_suffix.append(Gtk.Label(label="W"))
-        transform_suffix.append(self.width_entry)
-        transform_suffix.append(Gtk.Label(label="H"))
-        transform_suffix.append(self.height_entry)
-        transform_row.add_suffix(transform_suffix)
-        export_group.add(transform_row)
+        self.height_entry.set_width_chars(10)
+        self.height_row.add_suffix(self.height_entry)
+        export_group.add(self.height_row)
+
+        # GIF FPS row
+        self.gif_fps_values = [10, 15, 20, 24, 30, 60]
+        self.gif_fps_combo = Adw.ComboRow()
+        self.gif_fps_combo.set_title("GIF FPS")
+        self.gif_fps_combo.set_subtitle("Lower FPS greatly reduces GIF size")
+        self.gif_fps_combo.set_model(Gtk.StringList.new(["10FPS", "15FPS", "20FPS", "24FPS", "30FPS (big)", "60FPS (HUGE)"]))
+        self.gif_fps_combo.set_selected(1)  # 15 FPS default
+        self.gif_fps_combo.set_visible(False)
+        export_group.add(self.gif_fps_combo)
+
+        # GIF Resolution row
+        self.gif_resolution_values = [(320, -1), (640, -1), (720, -1)]
+        self.gif_resolution_combo = Adw.ComboRow()
+        self.gif_resolution_combo.set_title("GIF Resolution")
+        self.gif_resolution_combo.set_subtitle("Width preset; height keeps source aspect ratio")
+        self.gif_resolution_combo.set_model(Gtk.StringList.new(["320p (320px width)", "480p (640px width)", "720p (720px width)"]))
+        self.gif_resolution_combo.set_selected(1)  # 640:-1 default
+        self.gif_resolution_combo.set_visible(False)
+        export_group.add(self.gif_resolution_combo)
+
         self._update_copy_mode_controls(codec_row.get_selected())
 
         # Action buttons
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         buttons.set_halign(Gtk.Align.CENTER)
         buttons.set_margin_top(12)
-        main_box.append(buttons)
+        buttons.set_margin_bottom(18)
+        buttons.set_margin_start(12)
+        buttons.set_margin_end(12)
+        # Append buttons to the BOTTOM of the Right Panel, outside the ScrolledWindow
+        self.right_panel.append(buttons)
 
         btn_open = Gtk.Button(label="Open Video")
         btn_export = Gtk.Button(label="Export")
@@ -1104,23 +1052,173 @@ class EmendoApp(Adw.Application):
         self.duration = None
         self.video_width = None
         self.video_height = None
-        self.video_overlay_container = None
-
-        # Ensure dark mode support (Adwaita handles this automatically, but we verify)
-        style_manager = Adw.StyleManager.get_default()
-        # User's system preference will be respected automatically
 
         # Add keyboard shortcuts
         self._setup_keyboard_shortcuts()
 
         self.win.present()
 
+    def _create_audio_tracks_ui(self):
+        group = Adw.PreferencesGroup()
+        group.set_title("Audio Tracks")
+        group.set_description("Choose which tracks to include in export. Preview switches playback track.")
+        group.set_margin_top(6)
+
+        self.audio_tracks_box = Gtk.ListBox()
+        self.audio_tracks_box.add_css_class("boxed-list")
+        self.audio_tracks_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        group.add(self.audio_tracks_box)
+        self.audio_track_widgets = []
+        return group
+
+    def _volume_icon_name(self, volume: float) -> str:
+        if volume <= 0.0:
+            return "audio-volume-muted-symbolic"
+        if volume <= 0.66:
+            return "audio-volume-low-symbolic"
+        if volume <= 1.33:
+            return "audio-volume-medium-symbolic"
+        return "audio-volume-high-symbolic"
+
+    def _sync_volume_button(self, image: Gtk.Image, button: Gtk.MenuButton, adjustment: Gtk.Adjustment):
+        value = max(0.0, float(adjustment.get_value()))
+        image.set_from_icon_name(self._volume_icon_name(value))
+        button.set_tooltip_text(f"Volume: {int(round(value * 100))}%")
+
+    def _apply_preview_volume_for_index(self, index: int):
+        try:
+            for widget in self.audio_track_widgets:
+                if widget["index"] == index:
+                    self.player.set_preview_volume(widget["volume_adj"].get_value())
+                    return
+        except Exception:
+            log.warning("Failed applying preview volume for track index %s", index)
+
+    def _on_preview_volume_changed(self, adjustment: Gtk.Adjustment, index: int, radio: Gtk.CheckButton):
+        try:
+            if radio.get_active():
+                self.player.set_preview_volume(adjustment.get_value())
+        except Exception:
+            log.warning("Failed updating live preview volume for track index %s", index)
+
+    def _refresh_audio_tracks_ui(self):
+        # Clear existing
+        while True:
+            child = self.audio_tracks_box.get_first_child()
+            if not child:
+                break
+            self.audio_tracks_box.remove(child)
+
+        tracks = self.player.get_audio_tracks()
+        if not tracks and self._fallback_audio_tracks:
+            tracks = self._fallback_audio_tracks
+        self.audio_track_widgets = []
+
+        if not tracks:
+            # Show "No audio tracks" placeholder
+            row = Adw.ActionRow(title="No audio tracks found")
+            self.audio_tracks_box.append(row)
+            return
+
+        group_radio = None
+        for i, track in enumerate(tracks):
+            row = Gtk.ListBoxRow()
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            row_box.set_hexpand(True)
+            row_box.set_margin_start(12)
+            row_box.set_margin_end(12)
+            row_box.set_margin_top(8)
+            row_box.set_margin_bottom(8)
+            row.set_child(row_box)
+
+            track_label = Gtk.Label(label=track["label"])
+            track_label.set_xalign(0.0)
+            track_label.set_hexpand(True)
+            track_label.set_halign(Gtk.Align.FILL)
+            track_label.set_wrap(False)
+            track_label.set_single_line_mode(True)
+            track_label.set_ellipsize(Pango.EllipsizeMode.END)
+            track_label.set_size_request(180, -1)
+            row_box.append(track_label)
+
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            box.set_valign(Gtk.Align.CENTER)
+            box.set_halign(Gtk.Align.END)
+            box.set_hexpand(False)
+
+            # Preview Radio
+            radio = Gtk.CheckButton(label="Preview")
+            if group_radio:
+                radio.set_group(group_radio)
+            else:
+                group_radio = radio
+                radio.set_active(True) # Default first track active
+
+            # Use functools.partial or lambda with captured variable
+            # Python loop variable capture is weird, so be careful
+            # Correct way: lambda b, idx=track['index']: ...
+            radio.connect("toggled", lambda b, idx=track['index']: self._on_audio_track_preview_toggled(b, idx))
+            box.append(radio)
+
+            # Export Checkbox
+            chk = Gtk.CheckButton(label="Export")
+            chk.set_active(True) # Default all selected for export
+            box.append(chk)
+
+            # Volume button + popover slider
+            vol_adj = Gtk.Adjustment(value=1.0, lower=0.0, upper=2.0, step_increment=0.1, page_increment=0.5)
+
+            vol_icon = Gtk.Image.new_from_icon_name("audio-volume-medium-symbolic")
+            vol_button = Gtk.MenuButton()
+            vol_button.set_child(vol_icon)
+            vol_button.add_css_class("flat")
+            vol_button.set_valign(Gtk.Align.CENTER)
+
+            popover = Gtk.Popover()
+            popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            popover_box.set_margin_start(12)
+            popover_box.set_margin_end(12)
+            popover_box.set_margin_top(12)
+            popover_box.set_margin_bottom(12)
+
+            pop_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=vol_adj)
+            pop_scale.set_hexpand(True)
+            pop_scale.set_draw_value(False)
+            pop_scale.set_size_request(240, -1)
+            popover_box.append(pop_scale)
+
+            popover.set_child(popover_box)
+            vol_button.set_popover(popover)
+            self._sync_volume_button(vol_icon, vol_button, vol_adj)
+            vol_adj.connect("value-changed", lambda a, img=vol_icon, btn=vol_button: self._sync_volume_button(img, btn, a))
+            vol_adj.connect("value-changed", lambda a, idx=track["index"], r=radio: self._on_preview_volume_changed(a, idx, r))
+            box.append(vol_button)
+
+            row_box.append(box)
+            self.audio_tracks_box.append(row)
+
+            self.audio_track_widgets.append({
+                "index": track['index'],
+                "export_chk": chk,
+                "volume_adj": vol_adj,
+                "radio": radio,
+                "volume_button": vol_button,
+            })
+
+    def _on_audio_track_preview_toggled(self, button, index):
+        try:
+            if button.get_active():
+                self.player.set_audio_track(index)
+                self._apply_preview_volume_for_index(index)
+        except Exception:
+            log.warning("Preview toggle failed for track index %s", index)
+
     def _on_about_action(self, action, param):
         about = Adw.AboutWindow(
             transient_for=self.win,
-            application_name="Emendo",
-            application_icon="io.github.Gabriel2Silva.Emendo",
-            version="0.0.1",
+            application_name=APP_NAME,
+            application_icon=APP_ID,
+            version="1.0.0",
             website="https://github.com/Gabriel2Silva/Emendo",
         )
         about.set_comments("Media Exporter for trim, crop, and codec conversion workflows.")
@@ -1134,6 +1232,93 @@ class EmendoApp(Adw.Application):
         )
         about.present()
 
+    def _stop_ffmpeg_process(self, reason="shutdown"):
+        proc = self._ffmpeg_process
+        if not proc or proc.poll() is not None:
+            return
+
+        log.info("Stopping ffmpeg process (reason=%s, pid=%s)", reason, getattr(proc, "pid", "<unknown>"))
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = None
+
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception:
+            pass
+
+        try:
+            proc.wait(timeout=1.5)
+        except Exception:
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                pass
+
+        self._ffmpeg_process = None
+
+    def _shutdown_runtime(self, reason="shutdown"):
+        self._export_cancel_requested = True
+        self._stop_ffmpeg_process(reason=reason)
+        try:
+            self.player.cleanup()
+        except Exception:
+            log.exception("Player cleanup failed during shutdown")
+
+    def _on_close_request(self, _window):
+        self._shutdown_runtime(reason="window-close")
+        return False
+
+    def _report_error(self, title, message, secondary_text=None, *, area="app", level=logging.ERROR):
+        log.log(level, "[%s] %s: %s", area, title, message.replace("\n", " "))
+        _show_error(self.win, title, message, secondary_text)
+
+    def _report_unexpected(self, area, title, context, exc):
+        log.exception("[%s] %s", area, context)
+        _show_error(self.win, title, f"{context}\n\n{str(exc)}")
+
+    def _idle_report_error(self, title, message, secondary_text=None, area="app", level=logging.ERROR):
+        self._report_error(title, message, secondary_text, area=area, level=level)
+        return False
+
+    def _format_audio_tracks_for_log(self, audio_tracks_config):
+        if audio_tracks_config is None:
+            return "default_mapping"
+        if not audio_tracks_config:
+            return "no_audio"
+        return ",".join(f"{t['index']}@{t['volume']:.2f}" for t in audio_tracks_config)
+
+    def _log_export_preflight(self, plan):
+        codec_name = CODEC_CONFIGS.get(plan["codec_choice"], {}).get("name", "Unknown")
+        audio_name = AUDIO_CONFIGS.get(plan["audio_choice"], {}).get("name", "Unknown")
+        container_name = CONTAINER_NAMES.get(plan["container_choice"], "Unknown")
+        log.info(
+            "[export] preflight "
+            "range=%0.3f-%0.3f codec=%s audio=%s container=%s "
+            "fps=%s size=%sx%s video_filter=%s audio_tracks=%s",
+            plan["start"],
+            plan["end"],
+            codec_name,
+            audio_name,
+            container_name,
+            plan["target_fps"] if plan["target_fps"] is not None else "source",
+            plan["target_width"] if plan["target_width"] is not None else "source",
+            plan["target_height"] if plan["target_height"] is not None else "source",
+            plan["video_filter"] or "none",
+            self._format_audio_tracks_for_log(plan["audio_tracks_config"]),
+        )
+
     def _setup_keyboard_shortcuts(self):
         """Set up keyboard shortcuts for common operations."""
         # Create keyboard controller
@@ -1143,102 +1328,41 @@ class EmendoApp(Adw.Application):
         key_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.win.add_controller(key_controller)
 
-    def _on_key_pressed(self, controller, keyval, keycode, state):
+    def _on_key_pressed(self, _controller, keyval, _keycode, state):
         """Handle keyboard shortcuts."""
-        # Check for modifiers
         ctrl = (state & Gdk.ModifierType.CONTROL_MASK) != 0
         shift = (state & Gdk.ModifierType.SHIFT_MASK) != 0
-        
-        # Space: Play/Pause
-        # Try multiple ways to detect space key
-        space_detected = False
-        try:
-            if hasattr(Gdk, 'KEY_space'):
-                space_detected = (keyval == Gdk.KEY_space)
-        except:
-            pass
-        if not space_detected:
-            # Fallback: check keycode (65 is space on most keyboards) or Unicode value (0x0020)
-            space_detected = (keycode == 65 or keyval == 0x0020 or keyval == 32)
-        
-        if space_detected and not (ctrl or shift):
-            if hasattr(self, 'btn_play_pause'):
-                self.on_play_pause(self.btn_play_pause)
+
+        key_name = (Gdk.keyval_name(keyval) or "").lower()
+
+        if key_name == "space" and not (ctrl or shift):
+            self.on_play_pause(self.btn_play_pause)
             return True
-        
-        # Comma: Step back one frame
-        # Check for comma key (0x002C = 44) or less-than (shifted comma)
-        comma_detected = False
-        try:
-            if hasattr(Gdk, 'KEY_comma'):
-                comma_detected = (keyval == Gdk.KEY_comma)
-            if not comma_detected and hasattr(Gdk, 'KEY_less'):
-                comma_detected = (keyval == Gdk.KEY_less and shift)
-        except:
-            pass
-        if not comma_detected:
-            comma_detected = (keyval == 0x002C or (keyval == 0x003C and shift))  # comma or <
-        
-        if comma_detected:
+        if key_name in ("comma", "less"):
             self._seek_frame(-1)
             return True
-        
-        # Period: Step forward one frame
-        # Check for period key (0x002E = 46) or greater-than (shifted period)
-        period_detected = False
-        try:
-            if hasattr(Gdk, 'KEY_period'):
-                period_detected = (keyval == Gdk.KEY_period)
-            if not period_detected and hasattr(Gdk, 'KEY_greater'):
-                period_detected = (keyval == Gdk.KEY_greater and shift)
-        except:
-            pass
-        if not period_detected:
-            period_detected = (keyval == 0x002E or (keyval == 0x003E and shift))  # period or >
-        
-        if period_detected:
+        if key_name in ("period", "greater"):
             self._seek_frame(1)
             return True
-        
-        # Left/Right arrows: Seek
         if keyval == Gdk.KEY_Left:
-            if shift:
-                self._seek_delta(-5.0)  # Shift+Left: -5s
-            else:
-                self._seek_delta(-1.0)  # Left: -1s
+            self._seek_delta(-5.0 if shift else -1.0)
             return True
-        
         if keyval == Gdk.KEY_Right:
-            if shift:
-                self._seek_delta(5.0)  # Shift+Right: +5s
-            else:
-                self._seek_delta(1.0)  # Right: +1s
+            self._seek_delta(5.0 if shift else 1.0)
             return True
-        
-        # I: Set in point (start)
-        if keyval == Gdk.KEY_i and not (ctrl or shift):
-            if hasattr(self, 'on_set_start'):
-                self.on_set_start(None)
+
+        if key_name == "i" and not (ctrl or shift):
+            self.on_set_start(None)
             return True
-        
-        # O: Set out point (end)
-        if keyval == Gdk.KEY_o and not (ctrl or shift):
-            if hasattr(self, 'on_set_end'):
-                self.on_set_end(None)
+        if key_name == "o" and not (ctrl or shift):
+            self.on_set_end(None)
             return True
-        
-        # Ctrl+O: Open file
-        if keyval == Gdk.KEY_o and ctrl:
-            if hasattr(self, 'on_open'):
-                self.on_open(None)
+        if key_name == "o" and ctrl:
+            self.on_open(None)
             return True
-        
-        # Ctrl+E: Export
-        if keyval == Gdk.KEY_e and ctrl:
-            if hasattr(self, 'on_export'):
-                self.on_export(None)
+        if key_name == "e" and ctrl:
+            self.on_export(None)
             return True
-        
         return False
 
     def _create_button_content(self, icon_name: str, label_text: str):
@@ -1256,7 +1380,28 @@ class EmendoApp(Adw.Application):
 
     def _update_copy_mode_controls(self, codec_index):
         is_copy = (codec_index == 0)
+        codec_config = CODEC_CONFIGS.get(codec_index, {})
+        is_gif = bool(codec_config.get("is_gif"))
+        forced_audio_choice = codec_config.get("forced_audio_choice")
+        forced_container_choice = codec_config.get("forced_container_choice")
+        lock_audio_choice = bool(codec_config.get("lock_audio_choice"))
+        lock_container_choice = bool(codec_config.get("lock_container_choice"))
+
+        if forced_audio_choice is not None and 0 <= forced_audio_choice < len(AUDIO_CONFIGS):
+            self.audio_combo.set_selected(forced_audio_choice)
+        if forced_container_choice is not None and forced_container_choice in CONTAINER_NAMES:
+            self.container_combo.set_selected(forced_container_choice)
+
         self.audio_combo.set_sensitive(not is_copy)
+        self.container_combo.set_sensitive(True)
+        if is_gif:
+            self.audio_combo.set_sensitive(False)
+            self.container_combo.set_sensitive(False)
+        if lock_audio_choice and not is_copy:
+            self.audio_combo.set_sensitive(False)
+        if lock_container_choice and not is_copy:
+            self.container_combo.set_sensitive(False)
+
         self.fps_entry.set_sensitive(not is_copy)
         self.width_entry.set_sensitive(not is_copy)
         self.height_entry.set_sensitive(not is_copy)
@@ -1268,10 +1413,55 @@ class EmendoApp(Adw.Application):
             self.width_entry.set_text("")
             self.height_entry.set_text("")
 
+        defaults = codec_config.get("defaults", {})
+        if not is_copy:
+            fps_default = defaults.get("fps")
+            width_default = defaults.get("width")
+            height_default = defaults.get("height")
+            self.fps_entry.set_text("" if fps_default is None else str(fps_default))
+            self.width_entry.set_text("" if width_default is None else str(width_default))
+            self.height_entry.set_text("" if height_default is None else str(height_default))
+
+        if lock_audio_choice and forced_audio_choice is not None:
+            forced_audio_name = AUDIO_CONFIGS.get(forced_audio_choice, {}).get("name", "Locked by preset")
+            self.audio_combo.set_subtitle(f"Locked by video preset: {forced_audio_name}")
+        else:
+            self.audio_combo.set_subtitle("Choose audio encoding")
+
+        if lock_container_choice and forced_container_choice is not None:
+            forced_container_name = CONTAINER_NAMES.get(forced_container_choice, "Locked")
+            self.container_combo.set_subtitle(f"Locked by video preset: {forced_container_name}")
+        else:
+            self.container_combo.set_subtitle("Output file format")
+
+        if is_gif:
+            self.audio_combo.set_subtitle("GIF has no audio track")
+            self.container_combo.set_subtitle("Forced by preset: GIF")
+
+        # Toggle normal vs GIF transform controls
+        self.fps_row.set_visible(not is_gif)
+        self.width_row.set_visible(not is_gif)
+        self.height_row.set_visible(not is_gif)
+        self.gif_fps_combo.set_visible(is_gif)
+        self.gif_resolution_combo.set_visible(is_gif)
+        if hasattr(self, "audio_tracks_group") and self.audio_tracks_group:
+            self.audio_tracks_group.set_visible(not is_gif)
+
+        self._sync_video_codec_parameter_controls(codec_index)
+
     def on_codec_selected(self, combo, _):
         """Validate codec availability when selected."""
         selected = combo.get_selected()
         self._update_copy_mode_controls(selected)
+        codec_config = CODEC_CONFIGS.get(selected, {})
+        if codec_config.get("is_gif"):
+            self._report_error(
+                "GIF Warning",
+                "GIF exports are extremely inefficient.\n\n"
+                "Long trims, high FPS, and large resolutions can create very large files quickly.",
+                area="export",
+                level=logging.WARNING,
+            )
         if selected >= 0 and selected in CODEC_CONFIGS:
             encoder = CODEC_CONFIGS[selected]["encoder"]
             if encoder:
@@ -1282,6 +1472,270 @@ class EmendoApp(Adw.Application):
             if args[i] == "-c:a":
                 return args[i + 1]
         return None
+
+    def _codec_arg_value(self, args, key):
+        for i in range(len(args) - 1):
+            if args[i] == key:
+                return args[i + 1]
+        return None
+
+    def _set_codec_arg_value(self, args, key, value):
+        for i in range(len(args) - 1):
+            if args[i] == key:
+                args[i + 1] = value
+                return True
+        return False
+
+    def _video_preset_options_for_codec(self, codec_index):
+        encoder = CODEC_CONFIGS.get(codec_index, {}).get("encoder")
+        if encoder in ("libx264", "libx265"):
+            return [
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+                "placebo",
+            ]
+        if encoder == "libsvtav1":
+            return [str(i) for i in range(1, 13)]
+        return []
+
+    def _crf_range_for_codec(self, codec_index):
+        encoder = CODEC_CONFIGS.get(codec_index, {}).get("encoder")
+        if encoder in ("libx264", "libx265"):
+            return (0, 51)
+        if encoder == "libsvtav1":
+            return (0, 63)
+        return None
+
+    def _make_string_list(self, options):
+        values = options or []
+        if hasattr(Gtk, "StringList") and hasattr(Gtk.StringList, "new"):
+            return Gtk.StringList.new(values)
+        return values
+
+    def _bitrate_kbps_from_audio_choice(self, audio_choice):
+        args = AUDIO_CONFIGS.get(audio_choice, {}).get("args", [])
+        for i in range(len(args) - 1):
+            if args[i] == "-b:a":
+                value = args[i + 1].strip().lower()
+                if value.endswith("k"):
+                    try:
+                        return int(value[:-1])
+                    except ValueError:
+                        return None
+        return None
+
+    def _set_or_merge_svtav1_params(self, codec_args, updates):
+        raw = self._codec_arg_value(codec_args, "-svtav1-params") or ""
+        merged = {}
+        if raw:
+            for part in raw.split(":"):
+                part = part.strip()
+                if not part:
+                    continue
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    merged[k.strip()] = v.strip()
+                else:
+                    merged[part] = ""
+        for k, v in updates.items():
+            merged[str(k)] = str(v)
+        value = ":".join(f"{k}={v}" if v != "" else k for k, v in merged.items())
+        if not self._set_codec_arg_value(codec_args, "-svtav1-params", value):
+            codec_args.extend(["-svtav1-params", value])
+
+    def _combo_selected_value(self, combo):
+        if not combo:
+            return ""
+        model = combo.get_model()
+        idx = combo.get_selected()
+        if model is None or idx is None or idx < 0:
+            return ""
+        try:
+            if hasattr(model, "get_n_items"):
+                if idx >= model.get_n_items():
+                    return ""
+            else:
+                if idx >= len(model):
+                    return ""
+            if hasattr(model, "get_string"):
+                return model.get_string(idx) or ""
+            return model[idx] if idx < len(model) else ""
+        except Exception:
+            return ""
+
+    def _set_combo_selected_by_value(self, combo, value):
+        if not combo:
+            return
+        model = combo.get_model()
+        if model is None:
+            combo.set_selected(0)
+            return
+        try:
+            if hasattr(model, "get_n_items") and hasattr(model, "get_string"):
+                count = model.get_n_items()
+                for i in range(count):
+                    if model.get_string(i) == value:
+                        combo.set_selected(i)
+                        return
+            else:
+                for i, item in enumerate(model):
+                    if item == value:
+                        combo.set_selected(i)
+                        return
+        except Exception:
+            pass
+        combo.set_selected(0)
+
+    def _configure_video_preset_control(self, codec_index, default_preset, enabled):
+        combo = getattr(self, "video_preset_combo", None)
+        if not combo:
+            return
+
+        if enabled:
+            options = self._video_preset_options_for_codec(codec_index)
+            if default_preset and default_preset not in options:
+                options = [default_preset] + options
+            if not options:
+                options = [default_preset] if default_preset else ["medium"]
+            combo.set_sensitive(True)
+            combo.set_model(self._make_string_list(options))
+            self._set_combo_selected_by_value(combo, default_preset or options[0])
+            if CODEC_CONFIGS.get(codec_index, {}).get("encoder") == "libsvtav1":
+                combo.set_subtitle("SVT-AV1: lower preset is better quality, but slower")
+            else:
+                combo.set_subtitle("Encoder speed/quality preset")
+        else:
+            combo.set_sensitive(False)
+            combo.set_model(self._make_string_list(["N/A"]))
+            combo.set_selected(0)
+            combo.set_subtitle("Not available for selected codec")
+
+    def _configure_video_crf_control(self, codec_index, default_crf, enabled):
+        entry = getattr(self, "crf_entry", None)
+        if not entry:
+            return
+
+        crf_range = self._crf_range_for_codec(codec_index)
+        base_title = "Video CRF"
+        if enabled and crf_range:
+            min_crf, max_crf = crf_range
+            entry.set_sensitive(True)
+            entry.set_text(default_crf or "")
+            if hasattr(entry, "set_title"):
+                entry.set_title(f"{base_title} ({min_crf}-{max_crf}, lower is better quality)")
+            if hasattr(entry, "set_subtitle"):
+                entry.set_subtitle(f"Range {min_crf}-{max_crf}. Lower is better quality.")
+        else:
+            entry.set_sensitive(False)
+            entry.set_text("")
+            if hasattr(entry, "set_title"):
+                entry.set_title(base_title)
+            if hasattr(entry, "set_subtitle"):
+                entry.set_subtitle("Not available for selected codec")
+
+    def _sync_video_codec_parameter_controls(self, codec_index):
+        codec_config = CODEC_CONFIGS.get(codec_index, {})
+        args = codec_config.get("args", [])
+
+        crf_entry = getattr(self, "crf_entry", None)
+        preset_combo = getattr(self, "video_preset_combo", None)
+        if not crf_entry or not preset_combo:
+            return
+
+        has_crf = self._codec_arg_value(args, "-crf") is not None
+        has_preset = self._codec_arg_value(args, "-preset") is not None
+
+        if codec_index == 0:
+            has_crf = False
+            has_preset = False
+
+        self._configure_video_crf_control(codec_index, self._codec_arg_value(args, "-crf") or "", has_crf)
+        self._configure_video_preset_control(codec_index, self._codec_arg_value(args, "-preset") or "", has_preset)
+
+    def _apply_video_codec_parameter_overrides(self, codec_choice, codec_args):
+        if codec_choice == 0:
+            return
+
+        crf_entry = getattr(self, "crf_entry", None)
+        preset_combo = getattr(self, "video_preset_combo", None)
+        crf_text = crf_entry.get_text().strip() if crf_entry else ""
+        preset_text = self._combo_selected_value(preset_combo).strip() if preset_combo else ""
+
+        if crf_text and self._codec_arg_value(codec_args, "-crf") is not None:
+            if not re.fullmatch(r"\d+", crf_text):
+                raise ValueError("Video CRF must be an integer.")
+
+            crf_value = int(crf_text)
+            crf_range = self._crf_range_for_codec(codec_choice)
+            if crf_range:
+                min_crf, max_crf = crf_range
+                if crf_value < min_crf or crf_value > max_crf:
+                    raise ValueError(f"Video CRF must be between {min_crf} and {max_crf}.")
+            elif crf_value < 0:
+                raise ValueError("Video CRF must be zero or greater.")
+
+            self._set_codec_arg_value(codec_args, "-crf", str(crf_value))
+
+        if preset_text and self._codec_arg_value(codec_args, "-preset") is not None:
+            self._set_codec_arg_value(codec_args, "-preset", preset_text)
+
+    def _apply_strict_size_budget(self, codec_choice, codec_args, audio_choice, start, end):
+        codec_config = CODEC_CONFIGS.get(codec_choice, {})
+        size_limit = codec_config.get("strict_size_limit_bytes")
+        if not size_limit:
+            return
+
+        duration = max(0.001, float(end) - float(start))
+        overhead_bytes = int(codec_config.get("size_overhead_bytes", 0))
+        usable_bytes = size_limit - overhead_bytes
+        if usable_bytes <= 0:
+            raise ValueError("Preset size budget is invalid.")
+
+        audio_kbps = self._bitrate_kbps_from_audio_choice(audio_choice)
+        if not audio_kbps:
+            raise ValueError("Selected audio profile has no fixed bitrate for strict size mode.")
+
+        audio_bits = int(audio_kbps * 1000 * duration)
+        usable_bits = int(usable_bytes * 8)
+        if audio_bits >= usable_bits:
+            max_seconds = usable_bits / float(audio_kbps * 1000)
+            audio_name = AUDIO_CONFIGS.get(audio_choice, {}).get("name", f"{audio_kbps}k")
+            raise ValueError(
+                f"This clip is too long for the 8MB Discord preset with fixed {audio_name} audio.\n\n"
+                f"Current segment: {duration:.1f}s\n"
+                f"Maximum at this audio bitrate: {max_seconds:.1f}s"
+            )
+
+        # Keep a conservative margin for muxing variability.
+        target_video_bps = int((usable_bits - audio_bits) / duration)
+        target_video_bps = max(20_000, int(target_video_bps * 0.92))
+        target_video_kbps = max(20, target_video_bps // 1000)
+
+        video_encoder = self._codec_arg_value(codec_args, "-c:v")
+
+        # Enforce predictable-size settings with encoder-specific compatibility.
+        for key in ("-crf", "-maxrate", "-bufsize", "-b:v"):
+            while key in codec_args:
+                idx = codec_args.index(key)
+                del codec_args[idx:idx + 2]
+
+        if video_encoder == "libsvtav1":
+            # SVT-AV1 random-access does not support CBR in this setup; use VBR mode.
+            self._set_or_merge_svtav1_params(codec_args, {"rc": "1"})
+            codec_args.extend(["-b:v", f"{target_video_kbps}k"])
+        else:
+            codec_args.extend([
+                "-b:v", f"{target_video_kbps}k",
+                "-maxrate", f"{target_video_kbps}k",
+                "-bufsize", f"{target_video_kbps * 2}k",
+            ])
 
     def on_audio_selected(self, combo, _):
         """Validate audio encoder availability when selected."""
@@ -1354,9 +1808,10 @@ class EmendoApp(Adw.Application):
         if response != Gtk.ResponseType.ACCEPT:
             dialog.destroy()
             return
-        file = dialog.get_files()[0]
+        file = dialog.get_file()
         dialog.destroy()
-        self._open_file(file.get_path())
+        if file:
+            self._open_file(file.get_path())
 
     def on_drop_file(self, drop_target, value, x, y):
         try:
@@ -1376,61 +1831,123 @@ class EmendoApp(Adw.Application):
             log.exception("Failed to handle dropped file")
             return False
 
-    def _replace_video_widget(self, filepath):
-        """Replace video widget with a fresh instance, or reuse if possible"""
-        # Try to reuse existing widget first
-        if hasattr(self, "video") and self.video:
-            try:
-                self.video.stop()
-                # Clean up media stream resources properly
-                try:
-                    stream = self.video.get_media_stream()
-                    if stream:
-                        # Pause and seek to beginning to release resources
-                        try:
-                            stream.pause()
-                            stream.seek(0)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                # Try to set new file on existing widget
-                gf = Gio.File.new_for_path(filepath)
-                self.video.set_file(gf)
-                return
-            except Exception:
-                # If reuse fails, create new widget
-                try:
-                    self.video.stop()
-                    try:
-                        stream = self.video.get_media_stream()
-                        if stream:
-                            try:
-                                stream.pause()
-                                stream.seek(0)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    self.video.unparent()
-                except Exception:
-                    pass
-        
-        # Create new widget if reuse failed
-        self.video = Gtk.Video()
-        self.video.set_hexpand(True)
-        self.video.set_vexpand(True)
-        self.video.add_css_class("card")
-        
-        self.video_overlay.set_child(self.video)
-        self.video_overlay.add_overlay(self.crop_overlay)
-        
+    def _update_player_source(self, filepath):
+        if not filepath:
+            raise VideoLoadError("No file path provided.")
+        if not os.path.exists(filepath):
+            raise VideoLoadError(f"File not found: {filepath}")
         try:
-            gf = Gio.File.new_for_path(filepath)
-            self.video.set_file(gf)
+            uri = Gio.File.new_for_path(os.path.abspath(filepath)).get_uri()
+            self.player.set_uri(uri)
         except Exception as e:
-            log.exception("Failed to set file on video widget")
-            raise VideoLoadError(f"Failed to load video: {e}") from e
+            raise VideoLoadError(f"Failed to initialize playback: {e}") from e
+        if not self.video_picture.get_paintable():
+            paintable = self.player.get_paintable()
+            if paintable:
+                self.video_picture.set_paintable(paintable)
+
+    def _on_player_position_changed(self, player, position):
+        # Update timestamp label
+        dur = self.duration if self.duration else 0.0
+        self.time_label.set_text(f"{seconds_to_hmsms(position)} / {seconds_to_hmsms(dur)}")
+
+        # Update seekbar if not dragging
+        if not self._user_is_seeking:
+            self.seek_scale.set_value(position)
+
+    def _on_player_duration_changed(self, player, duration):
+        if self.duration is None or self.duration != duration:
+            self.duration = duration
+            self.end_entry.set_text(seconds_to_hmsms(duration))
+            self.seek_scale.set_range(0, duration)
+            self._update_trim_markers() # Refresh markers if duration changes
+            log.info(f"Duration updated from player: {duration}")
+
+    def _on_seek_drag_begin(self, gesture, x, y):
+        self._user_is_seeking = True
+
+    def _on_seek_drag_end(self, gesture, x, y):
+        self._user_is_seeking = False
+        # Final seek to ensure position is correct
+        val = self.seek_scale.get_value()
+        self.player.seek(val)
+
+    def _on_seek_change_value(self, scale, scroll, value):
+        # Allow value change
+        # If user is dragging (detected by gesture), we might throttle seeks?
+        # But change-value is emitted on mouse click jumping too.
+        # If we return False, the value changes. If True, it doesn't.
+        # We want it to change visually.
+        # We should seek.
+
+        # If this event comes from user interaction (which it does for change-value signal usually, unlike set_value)
+        self.player.seek(value)
+        return False # Propagate to update widget value
+
+    def _update_trim_markers(self):
+        """Update start/end marks on the seekbar."""
+        self.seek_scale.clear_marks()
+
+        try:
+            start_txt = self.start_entry.get_text()
+            if start_txt:
+                start_val = hmsms_to_seconds(start_txt)
+                self.seek_scale.add_mark(start_val, Gtk.PositionType.BOTTOM, "Start")
+        except Exception:
+            pass
+
+        try:
+            end_txt = self.end_entry.get_text()
+            if end_txt:
+                end_val = hmsms_to_seconds(end_txt)
+                self.seek_scale.add_mark(end_val, Gtk.PositionType.BOTTOM, "End")
+        except Exception:
+            pass
+
+    def _on_player_state_changed(self, player, state):
+        # 0: Stopped, 1: Playing, 2: Paused
+        if state == 1:
+            self._is_playing = True
+            self.btn_play_pause.set_child(
+                self._create_button_content("media-playback-pause-symbolic", "Pause")
+            )
+        else:
+            self._is_playing = False
+            self.btn_play_pause.set_child(
+                self._create_button_content("media-playback-start-symbolic", "Play")
+            )
+
+    def _on_player_eos(self, player):
+        log.info("EOS reached")
+        self._is_playing = False
+        self.btn_play_pause.set_child(
+            self._create_button_content("media-playback-start-symbolic", "Play")
+        )
+
+    def _on_player_error(self, player, error):
+        message = str(error).strip() or "Unknown GStreamer error."
+        now = time.monotonic()
+        if self._player_error_dialog_open:
+            log.warning("Suppressing repeated player error while dialog is open: %s", message)
+            return
+        if (
+            self._last_player_error_message == message
+            and now - self._last_player_error_time < 2.0
+        ):
+            log.warning("Suppressing duplicate player error: %s", message)
+            return
+
+        self._last_player_error_message = message
+        self._last_player_error_time = now
+        self._player_error_dialog_open = True
+        dlg = _show_error(self.win, "Player Error", f"GStreamer encountered an error:\n{message}")
+        try:
+            dlg.connect("destroy", lambda *_: setattr(self, "_player_error_dialog_open", False))
+        except Exception:
+            self._player_error_dialog_open = False
+
+    def _on_audio_tracks_changed(self, player):
+        self._refresh_audio_tracks_ui()
 
     def _show_loading(self, message="Loading..."):
         """Show loading spinner overlay."""
@@ -1463,7 +1980,7 @@ class EmendoApp(Adw.Application):
                 # Remove the overlay from video_overlay
                 self.video_overlay.remove_overlay(self._loading_spinner)
             except Exception as e:
-                log.debug(f"Error removing loading overlay: {e}")
+                log.debug("Error removing loading overlay: %s", e)
             finally:
                 self._loading_spinner = None
 
@@ -1472,7 +1989,12 @@ class EmendoApp(Adw.Application):
         def load_metadata():
             try:
                 duration, width, height, fps = probe_video_metadata(path, DEFAULT_FPS, FFPROBE_TIMEOUT)
-                GLib.idle_add(self._on_metadata_loaded, path, request_id, duration, width, height, fps)
+                try:
+                    audio_tracks = probe_audio_tracks(path, FFPROBE_TIMEOUT)
+                except Exception:
+                    log.warning("Failed to probe audio tracks; relying on player discovery.")
+                    audio_tracks = []
+                GLib.idle_add(self._on_metadata_loaded, path, request_id, duration, width, height, fps, audio_tracks)
             except subprocess.TimeoutExpired:
                 GLib.idle_add(self._on_metadata_error, path, request_id, "Timeout",
                              "ffprobe took too long to respond. The video file may be very large or corrupted.")
@@ -1492,10 +2014,9 @@ class EmendoApp(Adw.Application):
                 GLib.idle_add(self._on_metadata_error, path, request_id, "Metadata Error",
                              f"Failed to read video metadata:\n{str(e)}")
         
-        self._metadata_loading_thread = threading.Thread(target=load_metadata, daemon=True)
-        self._metadata_loading_thread.start()
+        threading.Thread(target=load_metadata, daemon=True).start()
 
-    def _on_metadata_loaded(self, path, request_id, duration, width, height, fps):
+    def _on_metadata_loaded(self, path, request_id, duration, width, height, fps, audio_tracks):
         """Handle loaded metadata."""
         if request_id != self._metadata_request_id or path != self.filepath:
             log.debug("Ignoring stale metadata result for %s", path)
@@ -1506,10 +2027,13 @@ class EmendoApp(Adw.Application):
         self.video_width = width
         self.video_height = height
         self.video_fps = fps
+        self._fallback_audio_tracks = audio_tracks or []
 
         if duration is not None:
             self.start_entry.set_text(seconds_to_hmsms(0.0))
             self.end_entry.set_text(seconds_to_hmsms(duration))
+            self.seek_scale.set_range(0, duration)
+            self._update_trim_markers()
             log.info(f"Video duration: {duration:.3f}s, FPS: {fps:.2f}")
             self.fps_entry.set_placeholder_text(f"{fps:.3f}".rstrip("0").rstrip("."))
 
@@ -1519,13 +2043,14 @@ class EmendoApp(Adw.Application):
             self.height_entry.set_placeholder_text(str(height))
             try:
                 self.crop_overlay.set_video_size(width, height)
-            except Exception:
-                pass
+            except RuntimeError:
+                log.exception("Failed to update crop overlay video size")
 
         if duration is None:
-            _show_error(self.win, "Metadata Error", "Failed to read video duration")
+            self._report_error("Metadata Error", "Failed to read video duration", area="metadata", level=logging.WARNING)
         if width is None or height is None:
-            _show_error(self.win, "Metadata Error", "Failed to read video dimensions")
+            self._report_error("Metadata Error", "Failed to read video dimensions", area="metadata", level=logging.WARNING)
+        self._refresh_audio_tracks_ui()
         return False
 
     def _on_metadata_error(self, path, request_id, title, message):
@@ -1535,32 +2060,37 @@ class EmendoApp(Adw.Application):
             return False
 
         self._hide_loading()
-        _show_error(self.win, title, message)
+        self._report_error(title, message, area="metadata")
         self.duration = None
         self.video_width = None
         self.video_height = None
+        self._fallback_audio_tracks = []
         return False
 
     def _open_file(self, path):
         if not path:
             return
         self.filepath = path
+        self._fallback_audio_tracks = []
         log.info(f"Selected file: {self.filepath}")
 
         # Show loading state
         self._show_loading("Loading video...")
 
         try:
-            self._replace_video_widget(self.filepath)
+            self._update_player_source(self.filepath)
         except VideoLoadError as e:
             self._hide_loading()
-            _show_error(self.win, "Video Load Error", f"Failed to load video file:\n{str(e)}", 
-                       "Please ensure the file is a valid video file and is not corrupted.")
+            self._report_error(
+                "Video Load Error",
+                f"Failed to load video file:\n{str(e)}",
+                secondary_text="Please ensure the file is a valid video file and is not corrupted.",
+                area="open",
+            )
             return
         except Exception as e:
             self._hide_loading()
-            log.exception("Unexpected error loading video")
-            _show_error(self.win, "Unexpected Error", f"An unexpected error occurred:\n{str(e)}")
+            self._report_unexpected("open", "Unexpected Error", "An unexpected error occurred while loading the video.", e)
             return
 
         # Load metadata asynchronously
@@ -1568,37 +2098,17 @@ class EmendoApp(Adw.Application):
         self._load_video_metadata_async(self.filepath, self._metadata_request_id)
 
     def _current_position_seconds(self) -> float:
-        try:
-            stream = self.video.get_media_stream()
-            if not stream:
-                raise RuntimeError("Media stream not ready")
-            timestamp = stream.get_timestamp()
-            if timestamp < 0:
-                return 0.0
-            return timestamp / 1_000_000.0
-        except AttributeError:
-            raise RuntimeError("Video widget not properly initialized")
-        except Exception as e:
-            log.debug("Error getting current position: %s", e)
-            raise RuntimeError(f"Failed to get playback position: {e}") from e
+        return self.player.get_position()
 
     def _seek_to(self, seconds: float):
-        try:
-            stream = self.video.get_media_stream()
-            if not stream:
-                return
-            if seconds < 0:
-                seconds = 0.0
-            stream.seek(int(seconds * 1_000_000))
-        except Exception:
-            pass
+        self.player.seek(seconds)
 
     def _seek_delta(self, delta: float):
         try:
             pos = self._current_position_seconds()
             self._seek_to(pos + delta)
-        except Exception:
-            pass
+        except RuntimeError:
+            log.exception("Seek failed")
 
     def on_set_start(self, button):
         try:
@@ -1607,11 +2117,14 @@ class EmendoApp(Adw.Application):
             log.info(f"Start set to {pos:.3f}s")
         except RuntimeError as e:
             log.warning("Failed to set start: %s", e)
-            _show_error(self.win, "Playback Error", 
-                       f"Failed to get current playback position:\n{str(e)}\n\nPlease ensure the video is loaded and playing.")
+            self._report_error(
+                "Playback Error",
+                f"Failed to get current playback position:\n{str(e)}",
+                secondary_text="Please ensure the video is loaded and playing.",
+                area="playback",
+            )
         except Exception as e:
-            log.exception("Unexpected error setting start")
-            _show_error(self.win, "Error", f"An unexpected error occurred:\n{str(e)}")
+            self._report_unexpected("playback", "Error", "An unexpected error occurred while setting start time.", e)
 
     def on_set_end(self, button):
         try:
@@ -1620,11 +2133,14 @@ class EmendoApp(Adw.Application):
             log.info(f"End set to {pos:.3f}s")
         except RuntimeError as e:
             log.warning("Failed to set end: %s", e)
-            _show_error(self.win, "Playback Error", 
-                       f"Failed to get current playback position:\n{str(e)}\n\nPlease ensure the video is loaded and playing.")
+            self._report_error(
+                "Playback Error",
+                f"Failed to get current playback position:\n{str(e)}",
+                secondary_text="Please ensure the video is loaded and playing.",
+                area="playback",
+            )
         except Exception as e:
-            log.exception("Unexpected error setting end")
-            _show_error(self.win, "Error", f"An unexpected error occurred:\n{str(e)}")
+            self._report_unexpected("playback", "Error", "An unexpected error occurred while setting end time.", e)
 
     def on_restart(self, button):
         log.info("Playback: restart")
@@ -1636,6 +2152,19 @@ class EmendoApp(Adw.Application):
             self._seek_to(self.duration)
 
     def _parse_output_transform_settings(self):
+        codec_choice = self.codec_combo.get_selected() if hasattr(self, "codec_combo") else -1
+        codec_config = CODEC_CONFIGS.get(codec_choice, {})
+        if codec_config.get("is_gif"):
+            fps_idx = self.gif_fps_combo.get_selected()
+            if fps_idx < 0 or fps_idx >= len(self.gif_fps_values):
+                raise ValueError("Select a valid GIF FPS value.")
+            res_idx = self.gif_resolution_combo.get_selected()
+            if res_idx < 0 or res_idx >= len(self.gif_resolution_values):
+                raise ValueError("Select a valid GIF resolution value.")
+            target_fps = float(self.gif_fps_values[fps_idx])
+            target_width, target_height = self.gif_resolution_values[res_idx]
+            return target_fps, target_width, target_height
+
         fps_text = self.fps_entry.get_text().strip()
         width_text = self.width_entry.get_text().strip()
         height_text = self.height_entry.get_text().strip()
@@ -1676,147 +2205,56 @@ class EmendoApp(Adw.Application):
         if not allowed_names:
             allowed_names = "None"
 
-        _show_error(
-            self.win,
+        self._report_error(
             "Audio/Container Incompatible",
             f"{audio_name} is not supported with {container_name} in this preset mapping.\n\n"
             f"Choose one of: {allowed_names}",
+            area="export",
         )
         return False
 
-    def on_export(self, button):
-        if not self.filepath:
-            log.warning("Export clicked with no video loaded")
-            _show_error(self.win, "No video", "Please open a video before exporting.")
-            return
+    def _collect_audio_tracks_config(self):
+        # None means "no explicit selection" (let ffmpeg pick default mapping).
+        # [] means "explicitly no audio selected" (emit -an).
+        widgets = getattr(self, "audio_track_widgets", None)
+        if widgets:
+            selected_tracks = []
+            for widget in widgets:
+                if widget["export_chk"].get_active():
+                    selected_tracks.append(
+                        {
+                            "index": widget["index"],
+                            "volume": widget["volume_adj"].get_value(),
+                        }
+                    )
+            return selected_tracks
 
         try:
-            start = hmsms_to_seconds(self.start_entry.get_text())
-            end = hmsms_to_seconds(self.end_entry.get_text())
-        except ValueError as e:
-            log.error("Invalid time format: %s", e)
-            _show_error(self.win, "Invalid Time Format", 
-                       f"Invalid time format in start or end time.\n\n{str(e)}\n\nPlease use format: HH:MM:SS.mmm or MM:SS.mmm or SS.mmm")
-            return
-        except Exception as e:
-            log.exception("Unexpected error parsing time")
-            _show_error(self.win, "Time Parse Error", f"Failed to parse time values:\n{str(e)}")
-            return
-
-        if end <= start:
-            log.error("End time must be greater than start time")
-            _show_error(self.win, "Invalid times", "End time must be greater than start time.")
-            return
-
-        try:
-            target_fps, target_width, target_height = self._parse_output_transform_settings()
-        except ValueError as e:
-            _show_error(self.win, "Invalid Output Settings", str(e))
-            return
-
-        codec_choice = self.codec_combo.get_selected()
-        audio_choice = self.audio_combo.get_selected()
-        container_choice = self.container_combo.get_selected()
-
-        has_video_transform = (
-            self.crop_toggle.get_active()
-            or target_fps is not None
-            or (target_width is not None and target_height is not None)
-        )
-        if codec_choice == 0 and has_video_transform:
-            _show_error(
-                self.win,
-                "Copy Mode Restriction",
-                "Copy (no re-encode) does not allow Crop, FPS, or Resolution changes.\n\n"
-                "Select an encoding codec (H.264/HEVC/AV1) to use those options."
+            discovered = self.player.get_audio_tracks()
+        except Exception:
+            discovered = []
+        if not discovered and self._fallback_audio_tracks:
+            discovered = self._fallback_audio_tracks
+        if discovered:
+            tracks = [{"index": t["index"], "volume": 1.0} for t in discovered]
+            log.warning(
+                "Audio track UI was not ready at export time; defaulting to all discovered tracks (%d).",
+                len(tracks),
             )
-            return
-        if codec_choice == 0 and not has_video_transform:
-            log.info("Stream copy selected with no video filters; audio selection will be ignored.")
-        elif not self._validate_audio_container_compatibility(audio_choice, container_choice):
-            return
+            return tracks
 
-        codec_name = CODEC_CONFIGS.get(codec_choice, {}).get("name", "Unknown")
-        audio_name = AUDIO_CONFIGS.get(audio_choice, {}).get("name", "Unknown")
-        container_name = CONTAINER_NAMES.get(container_choice, "Unknown")
+        log.warning("No audio track selection available; using ffmpeg default audio mapping.")
+        return None
 
-        log.info(f"Codec selected: {codec_name}")
-        log.info(f"Audio selected: {audio_name}")
-        log.info(f"Container selected: {container_name}")
-        log.info(f"Export requested: {start:.3f}s → {end:.3f}s")
-
-        home = os.path.expanduser("~")
-        export_dir = os.path.join(home, EXPORT_DIR)
-
-        if not os.path.exists(export_dir):
-            self._ask_create_export_dir(
-                export_dir,
-                start,
-                end,
-                codec_choice,
-                audio_choice,
-                container_choice,
-                target_fps,
-                target_width,
-                target_height,
-            )
-            return
-
-        self._do_export(
-            start,
-            end,
-            codec_choice,
-            audio_choice,
-            container_choice,
-            export_dir,
-            target_fps,
-            target_width,
-            target_height,
-        )
-
-    def _ask_create_export_dir(self, export_dir, start, end, codec_choice, audio_choice, container_choice, target_fps, target_width, target_height):
-        dlg = Gtk.MessageDialog(
-            transient_for=self.win,
-            modal=True,
-            buttons=Gtk.ButtonsType.NONE,
-            message_type=Gtk.MessageType.QUESTION,
-            text="Export directory does not exist",
-            secondary_text=f"Create {export_dir}?"
-        )
-        dlg.add_button("Create", Gtk.ResponseType.YES)
-        dlg.add_button("Use Home", Gtk.ResponseType.NO)
-        dlg.connect("response", self._on_create_dir_response,
-                    export_dir, start, end, codec_choice, audio_choice, container_choice, target_fps, target_width, target_height)
-        dlg.show()
-
-    def _on_create_dir_response(self, dlg, response, export_dir, start, end, codec_choice, audio_choice, container_choice, target_fps, target_width, target_height):
-        dlg.destroy()
-        if response == Gtk.ResponseType.YES:
-            try:
-                os.makedirs(export_dir, exist_ok=True)
-                log.info(f"Created export directory: {export_dir}")
-            except Exception as e:
-                log.error("Failed to create export directory %s: %s", export_dir, e)
-                _show_error(
-                    self.win,
-                    "Directory Error",
-                    f"Failed to create export directory:\n{export_dir}\n\nExporting to home instead.\n\n{str(e)}"
-                )
-                export_dir = os.path.expanduser("~")
-        else:
-            export_dir = os.path.expanduser("~")
-            log.info("User declined directory creation; exporting to home")
-        self._do_export(start, end, codec_choice, audio_choice, container_choice, export_dir, target_fps, target_width, target_height)
-
-    def _do_export(self, start, end, codec_choice, audio_choice, container_choice, export_dir, target_fps=None, target_width=None, target_height=None):
+    def _build_video_filter(self, target_fps=None, target_width=None, target_height=None):
         crop_enabled = self.crop_toggle.get_active()
         video_filters = []
+
         if crop_enabled and self.video_width and self.video_height:
-            widget_w = self.video.get_allocated_width()
-            widget_h = self.video.get_allocated_height()
+            widget_w = self.video_picture.get_allocated_width()
+            widget_h = self.video_picture.get_allocated_height()
             x, y, w, h = self.crop_overlay.get_crop_params(self.video_width, self.video_height, widget_w, widget_h)
-            w = int(w); h = int(h); x = int(x); y = int(y)
-            crop_filter = f"crop={w}:{h}:{x}:{y}"
+            crop_filter = f"crop={int(w)}:{int(h)}:{int(x)}:{int(y)}"
             video_filters.append(crop_filter)
             log.info(f"Crop filter: {crop_filter}")
 
@@ -1830,76 +2268,325 @@ class EmendoApp(Adw.Application):
             video_filters.append(scale_filter)
             log.info(f"Scale filter: {scale_filter}")
 
-        video_filter = ",".join(video_filters) if video_filters else None
+        return ",".join(video_filters) if video_filters else None
 
-        if video_filter and codec_choice == 0:
-            _show_error(
-                self.win,
-                "Copy Mode Restriction",
-                "Copy (no re-encode) cannot be used with Crop/FPS/Resolution filters."
-            )
-            return
-        
+    def _prepare_export_plan(
+        self,
+        start,
+        end,
+        codec_choice,
+        audio_choice,
+        container_choice,
+        target_fps=None,
+        target_width=None,
+        target_height=None,
+    ):
         if codec_choice not in CODEC_CONFIGS:
-            log.error("Invalid codec choice: %s", codec_choice)
-            _show_error(self.win, "Invalid Codec", 
-                       f"Selected codec index {codec_choice} is invalid.\n\nPlease select a valid codec from the list.")
-            return
-
+            log.warning("[export] blocked_reason=invalid_codec codec_choice=%s", codec_choice)
+            self._report_error(
+                "Invalid Codec",
+                f"Selected codec index {codec_choice} is invalid.\n\nPlease select a valid codec from the list.",
+                area="export",
+            )
+            return None
         if audio_choice not in AUDIO_CONFIGS:
-            log.error("Invalid audio choice: %s", audio_choice)
-            _show_error(self.win, "Invalid Audio Codec",
-                       f"Selected audio index {audio_choice} is invalid.\n\nPlease select a valid audio codec.")
-            return
+            log.warning("[export] blocked_reason=invalid_audio_codec audio_choice=%s", audio_choice)
+            self._report_error(
+                "Invalid Audio Codec",
+                f"Selected audio index {audio_choice} is invalid.\n\nPlease select a valid audio codec.",
+                area="export",
+            )
+            return None
 
-        audio_encoder = self._audio_encoder_from_args(AUDIO_CONFIGS[audio_choice]["args"])
-        if not (codec_choice == 0 and not video_filter) and audio_encoder:
-            audio_available = self._audio_codec_availability.get(audio_choice)
+        codec_config = CODEC_CONFIGS[codec_choice]
+        is_gif = bool(codec_config.get("is_gif"))
+        effective_audio_choice = codec_config.get("forced_audio_choice", audio_choice)
+        effective_container_choice = codec_config.get("forced_container_choice", container_choice)
+
+        if not is_gif and effective_audio_choice not in AUDIO_CONFIGS:
+            self._report_error(
+                "Invalid Preset Configuration",
+                f"Video preset requires unsupported audio choice index {effective_audio_choice}.",
+                area="export",
+            )
+            return None
+        if effective_container_choice not in CONTAINER_NAMES:
+            self._report_error(
+                "Invalid Preset Configuration",
+                f"Video preset requires unsupported container choice index {effective_container_choice}.",
+                area="export",
+            )
+            return None
+
+        video_filter = self._build_video_filter(target_fps, target_width, target_height)
+        audio_tracks_config = [] if is_gif else self._collect_audio_tracks_config()
+        has_audio_transform = bool(audio_tracks_config) and (
+            len(audio_tracks_config) > 1 or any(t["volume"] != 1.0 for t in audio_tracks_config)
+        )
+
+        has_video_transform = (
+            self.crop_toggle.get_active()
+            or target_fps is not None
+            or (target_width is not None and target_height is not None)
+        )
+        if codec_choice == 0 and has_video_transform:
+            log.warning("[export] blocked_reason=copy_mode_video_transform")
+            self._report_error(
+                "Copy Mode Restriction",
+                "Copy (no re-encode) does not allow Crop, FPS, or Resolution changes.\n\n"
+                "Select an encoding codec (H.264/HEVC/AV1) to use those options.",
+                area="export",
+            )
+            return None
+        if codec_choice == 0 and has_audio_transform:
+            log.warning("[export] blocked_reason=copy_mode_audio_transform")
+            self._report_error(
+                "Copy Mode Restriction",
+                "Copy (no re-encode) cannot be used with Audio Mixing/Volume changes.\n\n"
+                "Select an encoding codec (H.264/HEVC/AV1) to use these features.",
+                area="export",
+            )
+            return None
+
+        requires_even_dimensions = "yuv420p" in codec_config.get("args", [])
+        if (
+            requires_even_dimensions
+            and target_width is not None
+            and target_height is not None
+            and (target_width % 2 != 0 or target_height % 2 != 0)
+        ):
+            log.warning(
+                "[export] blocked_reason=odd_dimensions_for_yuv420p width=%s height=%s",
+                target_width,
+                target_height,
+            )
+            self._report_error(
+                "Invalid Output Settings",
+                "This codec profile requires even width and height.\n\n"
+                f"You entered {target_width}x{target_height}. Please use even numbers (for example 512x342).",
+                area="export",
+            )
+            return None
+
+        if codec_choice == 0 and not has_video_transform:
+            log.info("Stream copy selected with no video filters; audio selection will be ignored.")
+            # Keep copy-mode behavior explicit and deterministic: no remapping/mixing/-an.
+            audio_tracks_config = None
+        elif (not is_gif) and (not self._validate_audio_container_compatibility(effective_audio_choice, effective_container_choice)):
+            return None
+
+        video_encoder = codec_config.get("encoder")
+        if video_encoder:
+            video_available = self._codec_availability.get(codec_choice)
+            if video_available is False:
+                log.warning("[export] blocked_reason=video_encoder_unavailable encoder=%s", video_encoder)
+                self._report_error(
+                    "Codec Not Available",
+                    f"The {video_encoder} encoder is not available in your FFmpeg installation.\n\n"
+                    "Please install the required codec or select a different option.",
+                    area="export",
+                )
+                return None
+            if video_available is None and codec_choice not in self._codec_availability:
+                try:
+                    video_available = check_encoder_available(video_encoder, CODEC_CHECK_TIMEOUT)
+                    self._codec_availability[codec_choice] = video_available
+                except Exception:
+                    self._codec_availability[codec_choice] = None
+                    video_available = None
+                if video_available is False:
+                    log.warning("[export] blocked_reason=video_encoder_unavailable encoder=%s", video_encoder)
+                    self._report_error(
+                        "Codec Not Available",
+                        f"The {video_encoder} encoder is not available in your FFmpeg installation.\n\n"
+                        "Please install the required codec or select a different option.",
+                        area="export",
+                    )
+                    return None
+
+        audio_encoder = None if is_gif else self._audio_encoder_from_args(AUDIO_CONFIGS[effective_audio_choice]["args"])
+        if (not is_gif) and not (codec_choice == 0 and not video_filter) and audio_encoder:
+            audio_available = self._audio_codec_availability.get(effective_audio_choice)
             if audio_available is False:
-                _show_error(
-                    self.win,
+                log.warning("[export] blocked_reason=audio_encoder_unavailable encoder=%s", audio_encoder)
+                self._report_error(
                     "Audio Codec Not Available",
                     f"The {audio_encoder} audio encoder is not available in your FFmpeg installation.\n\n"
-                    "Please install the required codec or select a different option."
+                    "Please install the required codec or select a different option.",
+                    area="export",
                 )
-                return
-            if audio_available is None and audio_choice not in self._audio_codec_availability:
+                return None
+            if audio_available is None and effective_audio_choice not in self._audio_codec_availability:
                 try:
                     audio_available = check_encoder_available(audio_encoder, CODEC_CHECK_TIMEOUT)
-                    self._audio_codec_availability[audio_choice] = audio_available
+                    self._audio_codec_availability[effective_audio_choice] = audio_available
                 except Exception:
+                    self._audio_codec_availability[effective_audio_choice] = None
                     audio_available = None
-                    self._audio_codec_availability[audio_choice] = None
                 if audio_available is False:
-                    _show_error(
-                        self.win,
+                    log.warning("[export] blocked_reason=audio_encoder_unavailable encoder=%s", audio_encoder)
+                    self._report_error(
                         "Audio Codec Not Available",
                         f"The {audio_encoder} audio encoder is not available in your FFmpeg installation.\n\n"
-                        "Please install the required codec or select a different option."
+                        "Please install the required codec or select a different option.",
+                        area="export",
                     )
-                    return
-        
-        # Check codec availability if we have cached it
-        if codec_choice in self._codec_availability:
-            if self._codec_availability[codec_choice] is False:
-                encoder = CODEC_CONFIGS[codec_choice].get("encoder")
-                _show_error(self.win, "Codec Not Available", 
-                           f"The {encoder} encoder is not available in your FFmpeg installation.\n\nPlease install the required codec or select a different option.")
-                return
-        
-        codec_config = CODEC_CONFIGS[codec_choice]
+                    return None
+
         codec_args = codec_config["args"].copy()
-        if codec_choice == 0 and not video_filter:
-            log.info("Using pure stream copy mode; skipping selected audio codec.")
-        else:
-            audio_args = AUDIO_CONFIGS[audio_choice]["args"].copy()
-            codec_args.extend(audio_args)
-        ext = CONTAINER_EXTS.get(container_choice, "mp4")
+        try:
+            self._apply_video_codec_parameter_overrides(codec_choice, codec_args)
+        except ValueError as e:
+            self._report_error(
+                "Invalid Video Settings",
+                f"{str(e)}\n\nPlease correct Video CRF/Preset values and try again.",
+                area="export",
+            )
+            return None
+
+        try:
+            self._apply_strict_size_budget(codec_choice, codec_args, effective_audio_choice, start, end)
+        except ValueError as e:
+            self._report_error(
+                "Preset Constraint",
+                str(e),
+                area="export",
+            )
+            return None
+
+        if (not is_gif) and not (codec_choice == 0 and not video_filter):
+            codec_args.extend(AUDIO_CONFIGS[effective_audio_choice]["args"].copy())
+
+        return {
+            "start": start,
+            "end": end,
+            "codec_choice": codec_choice,
+            "audio_choice": effective_audio_choice,
+            "container_choice": effective_container_choice,
+            "target_fps": target_fps,
+            "target_width": target_width,
+            "target_height": target_height,
+            "video_filter": video_filter,
+            "audio_tracks_config": audio_tracks_config,
+            "codec_args": codec_args,
+        }
+
+    def on_export(self, button):
+        if not self.filepath:
+            log.warning("Export clicked with no video loaded")
+            self._report_error("No Video", "Please open a video before exporting.", area="export", level=logging.WARNING)
+            return
+
+        try:
+            start = hmsms_to_seconds(self.start_entry.get_text())
+            end = hmsms_to_seconds(self.end_entry.get_text())
+        except ValueError as e:
+            log.error("Invalid time format: %s", e)
+            self._report_error(
+                "Invalid Time Format",
+                f"Invalid time format in start or end time.\n\n{str(e)}",
+                secondary_text="Please use format: HH:MM:SS.mmm or MM:SS.mmm or SS.mmm",
+                area="export",
+            )
+            return
+        except Exception as e:
+            self._report_unexpected("export", "Time Parse Error", "Failed to parse time values.", e)
+            return
+
+        if end <= start:
+            log.error("End time must be greater than start time")
+            self._report_error("Invalid Times", "End time must be greater than start time.", area="export")
+            return
+
+        try:
+            target_fps, target_width, target_height = self._parse_output_transform_settings()
+        except ValueError as e:
+            self._report_error("Invalid Output Settings", str(e), area="export")
+            return
+
+        codec_choice = self.codec_combo.get_selected()
+        audio_choice = self.audio_combo.get_selected()
+        container_choice = self.container_combo.get_selected()
+        plan = self._prepare_export_plan(
+            start,
+            end,
+            codec_choice,
+            audio_choice,
+            container_choice,
+            target_fps,
+            target_width,
+            target_height,
+        )
+        if not plan:
+            return
+        self._log_export_preflight(plan)
+
+        codec_name = CODEC_CONFIGS.get(plan["codec_choice"], {}).get("name", "Unknown")
+        audio_name = AUDIO_CONFIGS.get(plan["audio_choice"], {}).get("name", "Unknown")
+        container_name = CONTAINER_NAMES.get(plan["container_choice"], "Unknown")
+
+        log.info(f"Codec selected: {codec_name}")
+        log.info(f"Audio selected: {audio_name}")
+        log.info(f"Container selected: {container_name}")
+        log.info(f"Export requested: {start:.3f}s → {end:.3f}s")
+
+        home = os.path.expanduser("~")
+        export_dir = os.path.join(home, EXPORT_DIR)
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+        except Exception as e:
+            log.error("Failed to ensure export directory %s: %s", export_dir, e)
+            self._report_error(
+                "Export Failed",
+                f"Could not access export directory:\n{export_dir}\n\n{str(e)}",
+                area="export",
+            )
+            return
+
+        output_path = self._default_export_output_path(plan, export_dir)
+        self._do_export(plan, output_path)
+
+    def _default_export_output_path(self, plan, export_dir):
+        codec_choice = plan["codec_choice"]
+        codec_config = CODEC_CONFIGS.get(codec_choice, {})
+        container_choice = plan["container_choice"]
+        ext = codec_config.get("output_ext") or CONTAINER_EXTS.get(container_choice, "mp4")
         base = os.path.basename(self.filepath)
         name, _ = os.path.splitext(base)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         output_base = f"Emendo_{name}_{timestamp}.{ext}"
-        output = os.path.join(export_dir, output_base)
+        return os.path.join(export_dir, output_base)
+
+    def _do_export(self, plan, output):
+        start = plan["start"]
+        end = plan["end"]
+        codec_choice = plan["codec_choice"]
+        codec_config = CODEC_CONFIGS.get(codec_choice, {})
+        codec_args = plan["codec_args"]
+        video_filter = plan["video_filter"]
+        audio_tracks_config = plan["audio_tracks_config"]
+        output_ext = codec_config.get("output_ext")
+        if output_ext:
+            output = os.path.splitext(output)[0] + f".{output_ext}"
+
+        if codec_config.get("is_gif"):
+            cmd = build_gif_command(
+                self.filepath,
+                start,
+                end,
+                video_filter,
+                output,
+            )
+            log.info(
+                "[export] command_ready output=%s tracks=%s video_filter=%s",
+                output,
+                "gif_no_audio",
+                video_filter or "none",
+            )
+            log.debug("[export] ffmpeg_cmd %s", " ".join(cmd))
+            self._start_ffmpeg_thread(cmd, start, end, output)
+            return
+
         cmd = build_ffmpeg_command(
             self.filepath,
             start,
@@ -1907,48 +2594,23 @@ class EmendoApp(Adw.Application):
             codec_args,
             video_filter,
             output,
+            audio_tracks_config=audio_tracks_config,
         )
-        log.debug("FFmpeg command:")
-        log.debug(" ".join(cmd))
+        log.info(
+            "[export] command_ready output=%s tracks=%s video_filter=%s",
+            output,
+            self._format_audio_tracks_for_log(audio_tracks_config),
+            video_filter or "none",
+        )
+        log.debug("[export] ffmpeg_cmd %s", " ".join(cmd))
         self._start_ffmpeg_thread(cmd, start, end, output)
-
-    def _get_codec_info(self, filepath):
-        """Extract video and audio codec information from a file."""
-        return get_codec_info(filepath)
-
-    def _get_cpu_temp(self):
-        """Get CPU temperature in Celsius."""
-        if psutil is None:
-            return None
-        try:
-            temps = psutil.sensors_temperatures()
-            if 'coretemp' in temps:
-                return temps['coretemp'][0].current
-            elif 'k10temp' in temps:
-                return temps['k10temp'][0].current
-            elif 'cpu_thermal' in temps:
-                return temps['cpu_thermal'][0].current
-            else:
-                for name, entries in temps.items():
-                    if entries:
-                        return entries[0].current
-        except Exception:
-            pass
-        return None
-
-    def _format_elapsed_time(self, seconds):
-        """Format elapsed time as HH:MM:SS."""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
     def _start_ffmpeg_thread(self, cmd, start_time, end_time, output_path):
         self._export_cancel_requested = False
         self._ffmpeg_process = None
         
         # Get source codec information
-        src_video_codec, src_audio_codec = self._get_codec_info(self.filepath)
+        src_video_codec, src_audio_codec = get_codec_info(self.filepath)
         
         # Determine target codecs from command
         dst_video_codec = "copy"
@@ -2058,7 +2720,14 @@ class EmendoApp(Adw.Application):
 
         def run_and_monitor():
             try:
-                proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1)
+                proc = subprocess.Popen(
+                    cmd,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
                 self._ffmpeg_process = proc
                 log.info("Started ffmpeg (pid=%s)", getattr(proc, "pid", "<unknown>"))
                 
@@ -2069,6 +2738,7 @@ class EmendoApp(Adw.Application):
                 last_progress_time = start_timestamp
                 progress_samples = []  # For calculating average speed
                 avg_speed = 0.0
+                stderr_tail = []
                 
                 # System monitoring thread
                 def update_system_metrics():
@@ -2078,14 +2748,14 @@ class EmendoApp(Adw.Application):
                         
                         try:
                             # CPU usage
-                            if psutil is not None:
-                                cpu_percent = psutil.cpu_percent(interval=0.5)
+                            cpu_percent = get_cpu_percent(interval=0.5)
+                            if cpu_percent is not None:
                                 GLib.idle_add(cpu_value.set_text, f"{cpu_percent:.1f}%")
                             else:
                                 GLib.idle_add(cpu_value.set_text, "N/A")
-                            
+
                             # CPU temperature
-                            temp = self._get_cpu_temp()
+                            temp = get_cpu_temperature()
                             if temp is not None:
                                 temp_text = f"{temp:.1f}°C"
                                 # Color warning for high temps
@@ -2098,7 +2768,7 @@ class EmendoApp(Adw.Application):
                             
                             # Elapsed time
                             elapsed = time.time() - start_timestamp
-                            GLib.idle_add(time_value.set_text, self._format_elapsed_time(elapsed))
+                            GLib.idle_add(time_value.set_text, format_elapsed_time(elapsed))
                         except Exception:
                             pass
                         
@@ -2112,6 +2782,10 @@ class EmendoApp(Adw.Application):
                         if raw_line is None:
                             continue
                         line = raw_line.strip()
+                        if line:
+                            stderr_tail.append(line)
+                            if len(stderr_tail) > 40:
+                                stderr_tail.pop(0)
                         if self._export_cancel_requested:
                             try:
                                 proc.kill()
@@ -2120,12 +2794,9 @@ class EmendoApp(Adw.Application):
                             break
                         t_seconds = parse_ffmpeg_time_seconds(line, hmsms_to_seconds)
                         if t_seconds is not None:
-                            t_str_match = re.search(r"time=(\d+:\d+:\d+\.?\d*)", line)
+                            t_str_match = re.search(r"time=([-0-9:.]+)", line)
                             t_str = t_str_match.group(1) if t_str_match else "00:00:00.000"
-                            if t_seconds >= start_time - 0.5:
-                                prog = (t_seconds - start_time) / duration_span
-                            else:
-                                prog = t_seconds / duration_span
+                            prog = t_seconds / duration_span
                             prog = max(0.0, min(1.0, prog))
                             now = time.time()
                             if now - last_update_time > FFMPEG_PROGRESS_THROTTLE:
@@ -2154,7 +2825,7 @@ class EmendoApp(Adw.Application):
                                         remaining_progress = 1.0 - prog
                                         eta_seconds = remaining_progress / avg_speed
                                         if eta_seconds < 3600:
-                                            eta_text = self._format_elapsed_time(eta_seconds)
+                                            eta_text = format_elapsed_time(eta_seconds)
                                         else:
                                             eta_text = ">1 hour"
                                     else:
@@ -2191,38 +2862,66 @@ class EmendoApp(Adw.Application):
                     GLib.idle_add(self._post_export_dialog, output_path)
                 else:
                     err_msg = f"ffmpeg exited with code {ret}"
-                    log.error(err_msg)
+                    tail_text = "\n".join(stderr_tail[-8:]).strip()
+                    if tail_text:
+                        log.error("[export] ffmpeg_stderr_tail\n%s", tail_text)
+                    log.error("[export] run_failed exit_code=%s", ret)
                     GLib.idle_add(progress_dialog.destroy)
-                    GLib.idle_add(_show_error, self.win, "Export Failed", 
-                                 f"ffmpeg reported an error during export.\n\nExit code: {ret}\n\nThis may indicate:\n- Insufficient disk space\n- Invalid codec parameters\n- Corrupted input file\n- Missing codec libraries")
+                    GLib.idle_add(
+                        self._idle_report_error,
+                        "Export Failed",
+                        (
+                            "ffmpeg reported an error during export.\n\n"
+                            f"Exit code: {ret}\n\n"
+                            + (f"FFmpeg details:\n{tail_text}\n\n" if tail_text else "")
+                            +
+                            "This may indicate:\n"
+                            "- Insufficient disk space\n"
+                            "- Invalid codec parameters\n"
+                            "- Corrupted input file\n"
+                            "- Missing codec libraries"
+                        ),
+                        None,
+                        "export",
+                    )
             except FileNotFoundError:
                 log.error("ffmpeg not found")
                 GLib.idle_add(progress_dialog.destroy)
-                GLib.idle_add(_show_error, self.win, "Export Failed", 
-                             "ffmpeg is not installed or not found in PATH.\n\nPlease install ffmpeg to export videos.")
+                GLib.idle_add(
+                    self._idle_report_error,
+                    "Export Failed",
+                    "ffmpeg is not installed or not found in PATH.\n\nPlease install ffmpeg to export videos.",
+                    None,
+                    "export",
+                )
             except PermissionError:
                 log.error("Permission denied running ffmpeg")
                 GLib.idle_add(progress_dialog.destroy)
-                GLib.idle_add(_show_error, self.win, "Export Failed", 
-                             "Permission denied when trying to run ffmpeg.\n\nPlease check file permissions.")
+                GLib.idle_add(
+                    self._idle_report_error,
+                    "Export Failed",
+                    "Permission denied when trying to run ffmpeg.\n\nPlease check file permissions.",
+                    None,
+                    "export",
+                )
             except Exception as e:
                 log.exception("Error running ffmpeg")
                 GLib.idle_add(progress_dialog.destroy)
-                GLib.idle_add(_show_error, self.win, "Export Failed", 
-                             f"An error occurred while exporting:\n{str(e)}")
+                GLib.idle_add(
+                    self._idle_report_error,
+                    "Export Failed",
+                    f"An error occurred while exporting:\n{str(e)}",
+                    None,
+                    "export",
+                )
 
-        self.process_thread = threading.Thread(target=run_and_monitor, daemon=True)
-        self.process_thread.start()
+        threading.Thread(target=run_and_monitor, daemon=True).start()
 
     def _on_progress_dialog_response(self, response):
         if response == Gtk.ResponseType.CANCEL:
             log.info("User requested export cancellation")
             self._export_cancel_requested = True
-            try:
-                if self._ffmpeg_process:
-                    self._ffmpeg_process.kill()
-            except Exception:
-                pass
+            self._stop_ffmpeg_process(reason="user-cancel")
 
     def _post_export_dialog(self, output_path):
         dialog = Gtk.MessageDialog(
@@ -2244,21 +2943,26 @@ class EmendoApp(Adw.Application):
         folder = os.path.dirname(output_path)
         if response == 1:
             try:
-                subprocess.Popen(["xdg-open", output_path])
+                open_path_with_system(output_path)
             except Exception:
-                _show_error(self.win, "Open failed", f"Failed to open {output_path}.")
+                self._report_error("Open Failed", f"Failed to open {output_path}.", area="export")
         elif response == 2:
             try:
-                subprocess.Popen(["xdg-open", folder])
+                open_path_with_system(folder)
             except Exception:
-                _show_error(self.win, "Open failed", f"Failed to open folder {folder}.")
+                self._report_error("Open Failed", f"Failed to open folder {folder}.", area="export")
         elif response == 3:
             try:
-                subprocess.Popen(["xdg-open", folder])
+                open_path_with_system(folder)
             except Exception:
-                _show_error(self.win, "Open failed", f"Failed to open folder {folder}.")
+                self._report_error("Open Failed", f"Failed to open folder {folder}.", area="export")
             self.quit()
 
 if __name__ == "__main__":
+    _install_stderr_fd_filter()
     app = EmendoApp()
-    app.run(None)
+    try:
+        app.run(None)
+    except KeyboardInterrupt:
+        log.info("Interrupted by SIGINT (Ctrl+C), shutting down cleanly")
+        app._shutdown_runtime(reason="sigint")
