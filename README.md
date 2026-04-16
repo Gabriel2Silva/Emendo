@@ -1,22 +1,23 @@
 <div align="center">
 
 # Emendo
-![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)  
+
+![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)<br>
 ![Emendo Icon](flatpak/io.github.Gabriel2Silva.Emendo.svg)
 
-<sub>_ēmendō_ (Latin, first conjugation)</sub>  
+<sub>_ēmendō_ (Latin, first conjugation)</sub><br>
 <sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>
 
-Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
+</div>
+
+<img width="1356" height="878" alt="image" src="https://github.com/user-attachments/assets/fe82b2cb-d493-455b-ac4e-0cbf12d84ebb" />
+
+Emendo is a lightweight GTK4/libadwaita media exporter for Linux, aimed at the GNOME desktop, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
 This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.
 
-<img width="1356" height="878" alt="image" src="https://github.com/user-attachments/assets/fe82b2cb-d493-455b-ac4e-0cbf12d84ebb" />
-
-
-</div>
 
 ## Why Emendo? There are numerous softwares that does the same.
 
@@ -45,7 +46,8 @@ It also tries to integrate well on a GNOME desktop, following the GNOME HIG for 
 ## Codec Presets
 
 Every preset produces output that is compatible with Discord embedding.
-Note that every single preset is customizable on-the-fly, so if you want to change CRF, preset or anything else, it's right there.
+
+Note that every single preset is customizable on-the-fly, so if you want to change CRF, container, preset or anything else, it's right there.
 
 | Preset | Container | Audio | Notes |
 |---|---|---|---|
@@ -66,7 +68,7 @@ Note that every single preset is customizable on-the-fly, so if you want to chan
 
 > [!NOTE]
 > The Discord presets automatically calculate the maximum video bitrate that fits within 8MB for your selected clip duration.
-
+> 
 ## Install (Flatpak Release)
 
 Download the latest `Emendo-*.flatpak` file from [Releases](../../releases), then run:
