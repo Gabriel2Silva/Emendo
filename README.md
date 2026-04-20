@@ -8,13 +8,10 @@
 <sub>_ēmendō_ (Latin, first conjugation)</sub><br>
 <sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>
 
+<img width="1306" height="951" alt="image" src="https://github.com/user-attachments/assets/f8c2cbd5-564a-484b-9719-7ad40d8f9d15" />
 </div>
 
-<img width="1309" height="703" alt="image" src="https://github.com/user-attachments/assets/e820282f-7777-4774-94f4-62c0bc4de46f" />
 <br>
-<br>
-
-Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.
 
 Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
