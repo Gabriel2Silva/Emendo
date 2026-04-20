@@ -1,17 +1,20 @@
 <div align="center">
 
-<div align="center">
-
 # Emendo
-![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)  
+
+![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)<br>
 ![Emendo Icon](flatpak/io.github.Gabriel2Silva.Emendo.svg)
 
-<sub>_ēmendō_ (Latin, first conjugation)</sub>  
+<sub>_ēmendō_ (Latin, first conjugation)</sub><br>
 <sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>
 
 </div>
 
-<img width="1356" height="878" alt="image" src="https://github.com/user-attachments/assets/fe82b2cb-d493-455b-ac4e-0cbf12d84ebb" />
+<img width="1309" height="703" alt="image" src="https://github.com/user-attachments/assets/e820282f-7777-4774-94f4-62c0bc4de46f" />
+<br>
+<br>
+
+Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.
 
 Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
@@ -56,11 +59,11 @@ Note that every single preset is customizable on-the-fly, so if you want to chan
 | H.264 Medium | MP4 | Selectable | Good balance |
 | H.264 Quality | MP4 | Selectable | High quality, slower |
 | **H.264 Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit |
-| HEVC Low | MP4 | Selectable | Smaller files than H.264, 720p/30fps |
+| HEVC Low | MP4 | Selectable | Agressive compression, 720p/30fps |
 | HEVC Medium | MP4 | Selectable | |
 | HEVC Quality | MP4 | Selectable | |
 | **HEVC Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit |
-| AV1 Low | MKV | Opus 128k | Best compression, 720p |
+| AV1 Low | MKV | Opus 128k | Agressive compression, 720p |
 | AV1 Medium | MKV | Opus 128k | |
 | AV1 Quality | MKV | Opus 128k | |
 | **AV1 Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit, 720p |
@@ -83,6 +86,13 @@ flatpak run io.github.Gabriel2Silva.Emendo
 
 > [!NOTE]
 > `ffmpeg`/`ffprobe` must be installed on the host system (it's already pre-installed in most distributions).
+
+## Install (AUR)
+
+Emendo is available in the Arch User Repository as ```emendo```.
+```bash
+yay -S emendo
+```
 
 ## Run from Source
 
