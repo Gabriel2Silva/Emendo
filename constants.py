@@ -68,9 +68,8 @@ CODEC_CONFIGS = {
             "-movflags", "+faststart",
         ],
         "encoder": "libx264",
-        "forced_audio_choice": 9,      # AAC (64k)
+        "forced_audio_choice": 6,      # Opus (96k) default
         "forced_container_choice": 0,  # MP4
-        "lock_audio_choice": True,
         "lock_container_choice": True,
         "strict_size_limit_bytes": 8 * 1024 * 1024,
         "size_overhead_bytes": 256 * 1024,
@@ -126,9 +125,8 @@ CODEC_CONFIGS = {
             "-movflags", "+faststart",
         ],
         "encoder": "libx265",
-        "forced_audio_choice": 9,      # AAC (64k)
+        "forced_audio_choice": 6,      # Opus (96k) default
         "forced_container_choice": 0,  # MP4
-        "lock_audio_choice": True,
         "lock_container_choice": True,
         "strict_size_limit_bytes": 8 * 1024 * 1024,
         "size_overhead_bytes": 256 * 1024,
@@ -144,10 +142,8 @@ CODEC_CONFIGS = {
             "-svtav1-params", "tune=0",
         ],
         "encoder": "libsvtav1",
-        "forced_audio_choice": 5,      # Opus (128k)
-        "forced_container_choice": 1,  # MKV
-        "lock_audio_choice": True,
-        "lock_container_choice": True,
+        "forced_audio_choice": 5,      # Opus (128k) default
+        "forced_container_choice": 1,  # MKV default
         "defaults": {"fps": None, "width": 1280, "height": 720},
     },
     10: {
@@ -160,10 +156,8 @@ CODEC_CONFIGS = {
             "-svtav1-params", "tune=0",
         ],
         "encoder": "libsvtav1",
-        "forced_audio_choice": 5,      # Opus (128k)
-        "forced_container_choice": 1,  # MKV
-        "lock_audio_choice": True,
-        "lock_container_choice": True,
+        "forced_audio_choice": 5,      # Opus (128k) default
+        "forced_container_choice": 1,  # MKV default
         "defaults": {"fps": None, "width": None, "height": None},
     },
     11: {
@@ -176,10 +170,8 @@ CODEC_CONFIGS = {
             "-svtav1-params", "tune=0",
         ],
         "encoder": "libsvtav1",
-        "forced_audio_choice": 5,      # Opus (128k)
-        "forced_container_choice": 1,  # MKV
-        "lock_audio_choice": True,
-        "lock_container_choice": True,
+        "forced_audio_choice": 5,      # Opus (128k) default
+        "forced_container_choice": 1,  # MKV default
         "defaults": {"fps": None, "width": None, "height": None},
     },
     12: {
@@ -192,9 +184,8 @@ CODEC_CONFIGS = {
             "-movflags", "+faststart",
         ],
         "encoder": "libsvtav1",
-        "forced_audio_choice": 9,      # AAC (64k)
+        "forced_audio_choice": 6,      # Opus (96k) default
         "forced_container_choice": 0,  # MP4
-        "lock_audio_choice": True,
         "lock_container_choice": True,
         "strict_size_limit_bytes": 8 * 1024 * 1024,
         "size_overhead_bytes": 256 * 1024,
@@ -221,6 +212,7 @@ AUDIO_CONFIGS = {
     7: {"name": "Vorbis (192k)", "args": ["-c:a", "libvorbis", "-b:a", "192k"]},
     8: {"name": "FLAC (lvl 8)", "args": ["-c:a", "flac", "-compression_level", "8"]},
     9: {"name": "AAC (64k)", "args": ["-c:a", "aac", "-b:a", "64k"]},
+    10: {"name": "Copy (no re-encode)", "args": ["-c:a", "copy"], "is_copy": True},
 }
 
 # Allowed output containers per audio profile index
@@ -233,11 +225,19 @@ AUDIO_CONTAINER_COMPAT = {
     2: {0, 1, 2},  # MP3 (320k)
     3: {0, 1, 2},  # MP3 (256k)
     4: {0, 1, 2},  # MP3 (128k)
-    5: {1},        # Opus (128k)
-    6: {1},        # Opus (96k)
+    5: {0, 1},     # Opus (128k) — MP4 allowed with warning
+    6: {0, 1},     # Opus (96k)  — MP4 allowed with warning
     7: {1},        # Vorbis (192k)
     8: {1},        # FLAC (lvl 8)
     9: {0, 1, 2},  # AAC (64k)
+    10: {0, 1, 2}, # Copy (no re-encode)
+}
+
+# Combinations that are technically allowed but non-standard; user gets a warning and must confirm.
+# Set of (audio_index, container_index) tuples.
+AUDIO_CONTAINER_WARN = {
+    (5, 0),  # Opus (128k) + MP4
+    (6, 0),  # Opus (96k)  + MP4
 }
 
 CONTAINER_EXTS = {0: "mp4", 1: "mkv", 2: "avi"}

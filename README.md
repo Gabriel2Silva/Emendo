@@ -1,18 +1,19 @@
 <div align="center">
 
-# Emendo
+<div align="center">
 
-![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)<br>
+# Emendo
+![GitHub top language](https://img.shields.io/github/languages/top/Gabriel2Silva/Emendo) ![Endpoint Badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhits.dwyl.com%2FGabriel2Silva%2FEmendo.json)  
 ![Emendo Icon](flatpak/io.github.Gabriel2Silva.Emendo.svg)
 
-<sub>_ēmendō_ (Latin, first conjugation)</sub><br>
+<sub>_ēmendō_ (Latin, first conjugation)</sub>  
 <sub>"to free from faults, correct, improve, remedy, amend, revise, cure"</sub>
 
 </div>
 
 <img width="1356" height="878" alt="image" src="https://github.com/user-attachments/assets/fe82b2cb-d493-455b-ac4e-0cbf12d84ebb" />
 
-Emendo is a lightweight GTK4/libadwaita media exporter for Linux, aimed at the GNOME desktop, with the main goal of being blazing fast and no-nonsense.  
+Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main goal of being blazing fast and no-nonsense.  
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
@@ -46,35 +47,37 @@ It also tries to integrate well on a GNOME desktop, following the GNOME HIG for 
 ## Codec Presets
 
 Every preset produces output that is compatible with Discord embedding.
+Note that every single preset is customizable on-the-fly, so if you want to change CRF, preset or anything else, it's right there.
 
-Note that every single preset is customizable on-the-fly, so if you want to change CRF, container, preset or anything else, it's right there.
-
-| Preset | Container | Audio | Notes |
+| Preset | Container | Audio (default) | Notes |
 |---|---|---|---|
-| Copy (no re-encode) | MP4/MKV/AVI | — | Lossless trim, instant |
-| H.264 Low/Baseline | MP4 | — | Maximum compatibility |
-| H.264 Medium | MP4 | — | Good balance |
-| H.264 Quality | MP4 | — | High quality, slower |
-| **H.264 Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
-| HEVC Low | MP4 | — | Smaller files than H.264 |
-| HEVC Medium | MP4 | — | |
-| HEVC Quality | MP4 | — | |
-| **HEVC Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
-| AV1 Low | MKV | Opus 128k | Best compression |
+| Copy (no re-encode) | MP4 / MKV / AVI | Copy (no re-encode) | Lossless trim, instant |
+| H.264 Low/Baseline | MP4 | Selectable | Maximum compatibility, 720p/30fps |
+| H.264 Medium | MP4 | Selectable | Good balance |
+| H.264 Quality | MP4 | Selectable | High quality, slower |
+| **H.264 Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit |
+| HEVC Low | MP4 | Selectable | Smaller files than H.264, 720p/30fps |
+| HEVC Medium | MP4 | Selectable | |
+| HEVC Quality | MP4 | Selectable | |
+| **HEVC Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit |
+| AV1 Low | MKV | Opus 128k | Best compression, 720p |
 | AV1 Medium | MKV | Opus 128k | |
 | AV1 Quality | MKV | Opus 128k | |
-| **AV1 Discord (8MB)** | MP4 | AAC 64k | Fits Discord's 8MB limit |
-| GIF | GIF | — | Configurable FPS and resolution |
+| **AV1 Discord (8MB)** | MP4 (locked) | Opus 96k | Fits Discord's 8MB limit, 720p |
+| GIF | GIF | — | Configurable FPS and resolution, 640px wide |
 
 > [!NOTE]
 > The Discord presets automatically calculate the maximum video bitrate that fits within 8MB for your selected clip duration.
-> 
+
+> [!NOTE]
+> All presets are fully customizable on-the-fly: audio codec, container, CRF, and encoder preset can all be overridden before export. Opus + MP4 is allowed with a compatibility warning.
+
 ## Install (Flatpak Release)
 
 Download the latest `Emendo-*.flatpak` file from [Releases](../../releases), then run:
 
 ```bash
-flatpak install --user ./Emendo-1.0.0.flatpak
+flatpak install --user ./Emendo-1.0.1.flatpak
 flatpak run io.github.Gabriel2Silva.Emendo
 ```
 

@@ -71,29 +71,75 @@ def hmsms_to_seconds(text: str) -> float:
     except Exception as e:
         raise ValueError(f"Invalid time format: {text}") from e
 
+def _build_dialog_body(message, secondary_text=None):
+    if secondary_text:
+        return f"{message}\n\n{secondary_text}"
+    return message
+
+
 def _show_error(parent, title, message, secondary_text=None):
+    body = _build_dialog_body(message, secondary_text)
     try:
-        if hasattr(Adw, "MessageDialog"):
-            body = message
-            if secondary_text:
-                body = f"{message}\n\n{secondary_text}"
-            dlg = Adw.MessageDialog(transient_for=parent, modal=True,
-                                    heading=title, body=body)
+        if hasattr(Adw, "AlertDialog"):
+            dlg = Adw.AlertDialog(heading=title, body=body)
             dlg.add_response("close", "Close")
-            dlg.add_css_class("error")
-            dlg.connect("response", lambda d, r: d.destroy())
-            dlg.present()
+            dlg.set_default_response("close")
+            dlg.set_close_response("close")
+            dlg.present(parent)
             return dlg
     except Exception:
-        log.debug("Adw.MessageDialog unavailable; falling back to Gtk.MessageDialog")
-    dlg = Gtk.MessageDialog(
-        transient_for=parent,
-        modal=True,
-        buttons=Gtk.ButtonsType.CLOSE,
-        message_type=Gtk.MessageType.ERROR,
-        text=title,
-        secondary_text=secondary_text or message
-    )
-    dlg.connect("response", lambda d, r: d.destroy())
-    dlg.present()
-    return dlg
+        log.debug("Adw.AlertDialog unavailable; falling back to Gtk.AlertDialog")
+
+    if hasattr(Gtk, "AlertDialog"):
+        dlg = Gtk.AlertDialog(message=title, detail=body, modal=True)
+        dlg.set_buttons(["Close"])
+        dlg.set_cancel_button(0)
+        dlg.set_default_button(0)
+        dlg.show(parent)
+        return dlg
+
+    raise RuntimeError("No GTK4/libadwaita alert dialog implementation available")
+
+def _show_confirm(parent, title, message, confirm_label, on_confirm, on_cancel=None):
+    """Show a modal confirmation dialog. Calls on_confirm() if the user confirms, on_cancel() otherwise."""
+    try:
+        if hasattr(Adw, "AlertDialog"):
+            dlg = Adw.AlertDialog(heading=title, body=message)
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("confirm", confirm_label)
+            dlg.set_response_appearance("confirm", Adw.ResponseAppearance.SUGGESTED)
+            dlg.set_default_response("confirm")
+            dlg.set_close_response("cancel")
+
+            def _on_adw_response(d, response):
+                if response == "confirm":
+                    on_confirm()
+                elif on_cancel:
+                    on_cancel()
+
+            dlg.connect("response", _on_adw_response)
+            dlg.present(parent)
+            return dlg
+    except Exception:
+        log.debug("Adw.AlertDialog unavailable; falling back to Gtk.AlertDialog")
+
+    if hasattr(Gtk, "AlertDialog"):
+        dlg = Gtk.AlertDialog(message=title, detail=message, modal=True)
+        dlg.set_buttons(["Cancel", confirm_label])
+        dlg.set_cancel_button(0)
+        dlg.set_default_button(1)
+
+        def _on_done(_source, result):
+            try:
+                response = dlg.choose_finish(result)
+            except Exception:
+                response = 0
+            if response == 1:
+                on_confirm()
+            elif on_cancel:
+                on_cancel()
+
+        dlg.choose(parent, None, _on_done)
+        return dlg
+
+    raise RuntimeError("No GTK4/libadwaita alert dialog implementation available")

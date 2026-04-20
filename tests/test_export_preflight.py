@@ -59,9 +59,16 @@ import emendo
 class _Toggle:
     def __init__(self, active=False):
         self._active = active
+        self._sensitive = True
 
     def get_active(self):
         return self._active
+
+    def set_active(self, active):
+        self._active = bool(active)
+
+    def set_sensitive(self, sensitive):
+        self._sensitive = bool(sensitive)
 
 
 class _Player:
@@ -165,11 +172,27 @@ def _make_app():
     app.player = _Player([])
     app._errors = []
     app.win = None
+    app._last_auto_transform_values = {"fps": "", "width": "", "height": ""}
+    app._restore_crop_after_copy = False
+    app.fps_entry = _Entry("")
+    app.width_entry = _Entry("")
+    app.height_entry = _Entry("")
+    app.fps_row = MagicMock()
+    app.width_row = MagicMock()
+    app.height_row = MagicMock()
+    app.gif_fps_combo = MagicMock()
+    app.gif_resolution_combo = MagicMock()
+    app.audio_tracks_group = MagicMock()
+    app.audio_combo = _Combo(["AAC", "Opus"], 0)
+    app.container_combo = _Combo(["MP4", "MKV", "AVI"], 0)
+    app.codec_combo = _Combo(["Copy", "H.264"], 0)
 
     def _report_error(self, title, message, secondary_text=None, *, area="app", level=None):
         self._errors.append((title, message, area))
 
     app._report_error = MethodType(_report_error, app)
+    app._set_transform_entry_default = MethodType(emendo.EmendoApp._set_transform_entry_default, app)
+    app._warn_for_audio_container_combo = MethodType(emendo.EmendoApp._warn_for_audio_container_combo, app)
     app._audio_encoder_from_args = MethodType(emendo.EmendoApp._audio_encoder_from_args, app)
     app._codec_arg_value = MethodType(emendo.EmendoApp._codec_arg_value, app)
     app._set_codec_arg_value = MethodType(emendo.EmendoApp._set_codec_arg_value, app)
@@ -246,11 +269,10 @@ class TestExportPreflight(unittest.TestCase):
     def test_audio_container_incompatibility_is_blocked(self):
         app = _make_app()
         with patch("emendo.check_encoder_available", return_value=True):
-            # Opus audio profile with MP4 container should be rejected by mapping
             plan = app._prepare_export_plan(0.0, 10.0, 1, 5, 0, None, None, None)
-        self.assertIsNone(plan)
-        self.assertTrue(app._errors)
-        self.assertEqual(app._errors[-1][0], "Audio/Container Incompatible")
+        self.assertIsNotNone(plan)
+        self.assertEqual(app._validate_audio_container_compatibility(5, 0), "warn")
+        self.assertFalse(app._errors)
 
     def test_prepare_export_plan_success_shape(self):
         app = _make_app()
@@ -263,7 +285,7 @@ class TestExportPreflight(unittest.TestCase):
         self.assertEqual(plan["start"], 0.0)
         self.assertEqual(plan["end"], 10.0)
         self.assertEqual(plan["container_choice"], 0)
-        self.assertEqual(plan["audio_choice"], 9)
+        self.assertEqual(plan["audio_choice"], 0)
         self.assertEqual(plan["video_filter"], "fps=35,scale=512:342")
         self.assertEqual(plan["audio_tracks_config"], [{"index": 0, "volume": 1.0}])
         self.assertIn("-c:v", plan["codec_args"])
@@ -316,13 +338,13 @@ class TestExportPreflight(unittest.TestCase):
         self.assertTrue(app._errors)
         self.assertEqual(app._errors[-1][0], "Invalid Video Settings")
 
-    def test_hevc_discord_forces_mp4_aac64_and_hvc1_tag(self):
+    def test_hevc_discord_keeps_selected_audio_and_forces_mp4_with_hvc1_tag(self):
         app = _make_app()
         with patch("emendo.check_encoder_available", return_value=True):
             plan = app._prepare_export_plan(0.0, 10.0, 8, 0, 2, None, None, None)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["container_choice"], 0)
-        self.assertEqual(plan["audio_choice"], 9)
+        self.assertEqual(plan["audio_choice"], 0)
         self.assertIn("-tag:v", plan["codec_args"])
         tag_idx = plan["codec_args"].index("-tag:v")
         self.assertEqual(plan["codec_args"][tag_idx + 1], "hvc1")
@@ -339,13 +361,13 @@ class TestExportPreflight(unittest.TestCase):
         pix_idx = plan["codec_args"].index("-pix_fmt")
         self.assertEqual(plan["codec_args"][pix_idx + 1], "yuv420p10le")
 
-    def test_av1_discord_forces_mp4_aac64_and_non_10bit(self):
+    def test_av1_discord_keeps_selected_audio_and_uses_non_10bit(self):
         app = _make_app()
         with patch("emendo.check_encoder_available", return_value=True):
             plan = app._prepare_export_plan(0.0, 10.0, 12, 0, 2, None, None, None)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["container_choice"], 0)
-        self.assertEqual(plan["audio_choice"], 9)
+        self.assertEqual(plan["audio_choice"], 0)
         self.assertIn("-svtav1-params", plan["codec_args"])
         params_idx = plan["codec_args"].index("-svtav1-params")
         self.assertEqual(plan["codec_args"][params_idx + 1], "tune=0:rc=1")
@@ -368,9 +390,39 @@ class TestExportPreflight(unittest.TestCase):
         app.audio_track_widgets = [
             {"index": 0, "export_chk": _WidgetCheck(True), "volume_adj": _WidgetVol(1.0)}
         ]
-        plan = app._prepare_export_plan(0.0, 10.0, 0, 0, 0, None, None, None)
+        plan = app._prepare_export_plan(0.0, 10.0, 0, 10, 0, None, None, None)
         self.assertIsNotNone(plan)
         self.assertIsNone(plan["audio_tracks_config"])
+
+    def test_discord_preset_defaults_to_opus_without_warning(self):
+        app = _make_app()
+        app.audio_combo = _Combo(["AAC", "Opus"], 0)
+        app.container_combo = _Combo(["MP4", "MKV", "AVI"], 2)
+        app.codec_combo = _Combo(["Copy", "Discord"], 4)
+
+        app._update_copy_mode_controls = MethodType(emendo.EmendoApp._update_copy_mode_controls, app)
+        app._sync_video_codec_parameter_controls = lambda *_: None
+        app._update_copy_mode_controls(4)
+
+        self.assertEqual(app.audio_combo.get_selected(), 6)
+        self.assertEqual(app.container_combo.get_selected(), 0)
+        self.assertFalse(app._warn_for_audio_container_combo(4, 6, 0))
+
+    def test_manual_transform_values_are_preserved_when_switching_codecs(self):
+        app = _make_app()
+        app._update_copy_mode_controls = MethodType(emendo.EmendoApp._update_copy_mode_controls, app)
+        app._sync_video_codec_parameter_controls = lambda *_: None
+
+        app._update_copy_mode_controls(1)
+        app.fps_entry.set_text("47.95")
+        app.width_entry.set_text("854")
+        app.height_entry.set_text("480")
+
+        app._update_copy_mode_controls(5)
+
+        self.assertEqual(app.fps_entry.get_text(), "47.95")
+        self.assertEqual(app.width_entry.get_text(), "854")
+        self.assertEqual(app.height_entry.get_text(), "480")
 
     def test_prepare_export_plan_blocks_when_video_encoder_unavailable_on_sync_check(self):
         app = _make_app()
@@ -409,6 +461,8 @@ class TestExportDestinationAndPostExportActions(unittest.TestCase):
         app._report_error = MethodType(_report_error, app)
         app._report_unexpected = lambda *_: None
         app._default_export_output_path = MethodType(emendo.EmendoApp._default_export_output_path, app)
+        app._run_export_with_plan = MethodType(emendo.EmendoApp._run_export_with_plan, app)
+        app._warn_for_audio_container_combo = MethodType(emendo.EmendoApp._warn_for_audio_container_combo, app)
         app.on_export = MethodType(emendo.EmendoApp.on_export, app)
 
         with patch("emendo.os.path.expanduser", return_value="/home/tester"), patch("emendo.os.makedirs"):
@@ -434,9 +488,8 @@ class TestExportDestinationAndPostExportActions(unittest.TestCase):
         dialog = MagicMock()
         output_path = "/home/tester/Emendo/out.mp4"
         with patch("emendo.open_path_with_system") as mock_open:
-            app._on_post_export_response(dialog, 2, output_path)
+            app._on_post_export_response(dialog, "open_folder", output_path)
 
-        dialog.destroy.assert_called_once()
         mock_open.assert_called_once_with("/home/tester/Emendo")
         self.assertFalse(app._errors)
 
@@ -454,12 +507,71 @@ class TestExportDestinationAndPostExportActions(unittest.TestCase):
         dialog = MagicMock()
         output_path = "/home/tester/Emendo/out.mp4"
         with patch("emendo.open_path_with_system") as mock_open:
-            app._on_post_export_response(dialog, 3, output_path)
+            app._on_post_export_response(dialog, "open_quit", output_path)
 
-        dialog.destroy.assert_called_once()
         mock_open.assert_called_once_with("/home/tester/Emendo")
         app.quit.assert_called_once()
         self.assertFalse(app._errors)
+
+
+class TestOpenDialogLifecycle(unittest.TestCase):
+    def test_on_open_reuses_existing_dialog(self):
+        app = type("FakeOpenApp", (), {})()
+        app.win = object()
+        existing_dialog = MagicMock()
+        app._open_dialog = existing_dialog
+        app.on_open = MethodType(emendo.EmendoApp.on_open, app)
+
+        with patch("emendo.Gtk.FileChooserNative", create=True) as chooser_cls:
+            app.on_open(None)
+
+        existing_dialog.show.assert_called_once()
+        chooser_cls.assert_not_called()
+
+    def test_on_file_chosen_clears_open_dialog_reference(self):
+        app = type("FakeOpenApp", (), {})()
+        dialog = MagicMock()
+        file_obj = MagicMock()
+        dialog.get_file.return_value = file_obj
+        app._open_dialog = dialog
+        app._open_file = MagicMock()
+        app.on_file_chosen = MethodType(emendo.EmendoApp.on_file_chosen, app)
+
+        response_type = types.SimpleNamespace(ACCEPT=1)
+        with patch.object(emendo.Gtk, "ResponseType", response_type, create=True):
+            app.on_file_chosen(dialog, response_type.ACCEPT)
+
+        self.assertIsNone(app._open_dialog)
+        dialog.destroy.assert_called_once()
+        app._open_file.assert_called_once()
+
+
+class TestExportDialogLifecycle(unittest.TestCase):
+    def test_dismiss_export_dialog_closes_presented_dialog_once(self):
+        app = type("FakeExportDialogApp", (), {})()
+        dialog = MagicMock()
+        dialog.get_presented.return_value = True
+        app._export_dialog = dialog
+        app._dismiss_export_dialog = MethodType(emendo.EmendoApp._dismiss_export_dialog, app)
+
+        result = app._dismiss_export_dialog()
+
+        self.assertFalse(result)
+        dialog.close.assert_called_once()
+        self.assertIsNone(app._export_dialog)
+
+    def test_dismiss_export_dialog_noops_when_dialog_not_presented(self):
+        app = type("FakeExportDialogApp", (), {})()
+        dialog = MagicMock()
+        dialog.get_presented.return_value = False
+        app._export_dialog = dialog
+        app._dismiss_export_dialog = MethodType(emendo.EmendoApp._dismiss_export_dialog, app)
+
+        result = app._dismiss_export_dialog()
+
+        self.assertFalse(result)
+        dialog.close.assert_not_called()
+        self.assertIsNone(app._export_dialog)
 
 
 if __name__ == "__main__":

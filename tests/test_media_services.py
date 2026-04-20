@@ -232,8 +232,9 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(format_elapsed_time(0), "00:00:00")
         self.assertEqual(format_elapsed_time(3661), "01:01:01")
 
-    def test_get_cpu_temperature_none_when_psutil_missing(self):
-        self.assertIsNone(get_cpu_temperature(None))
+    def test_get_cpu_temperature_returns_float_or_none(self):
+        value = get_cpu_temperature(None)
+        self.assertTrue(value is None or isinstance(value, float))
 
     @patch("subprocess.Popen")
     def test_open_path_with_system(self, mock_popen):

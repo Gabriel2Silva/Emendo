@@ -230,7 +230,7 @@ def probe_audio_tracks(path: str, timeout: int):
     return tracks
 
 
-def get_codec_info(filepath: str) -> Tuple[str, str]:
+def get_codec_info(filepath: str, timeout: int = 10) -> Tuple[str, str]:
     """Extract video/audio codec names from ffprobe output."""
     def _probe_first_codec(stream_selector: str) -> str:
         result = subprocess.run(
@@ -247,6 +247,7 @@ def get_codec_info(filepath: str) -> Tuple[str, str]:
             ],
             capture_output=True,
             text=True,
+            timeout=timeout,
         )
         if result.returncode == 0 and result.stdout:
             value = result.stdout.strip().split("\n", 1)[0].strip()
@@ -285,10 +286,11 @@ def build_ffmpeg_command(
         # If config is empty list, it means no audio selected
         if not audio_tracks_config:
              cmd.append("-an")
-        elif len(audio_tracks_config) == 1 and audio_tracks_config[0]['volume'] == 1.0:
-            # Single track, no volume change: simple mapping
-            idx = audio_tracks_config[0]['index']
-            audio_map_args = ["-map", f"0:v", "-map", f"0:a:{idx}"]
+        elif all(abs(t['volume'] - 1.0) < 1e-9 for t in audio_tracks_config):
+            # All tracks at default volume: simple mapping, no filtergraph needed
+            audio_map_args = ["-map", "0:v"]
+            for t in audio_tracks_config:
+                audio_map_args += ["-map", f"0:a:{t['index']}"]
         else:
             # Multiple tracks or volume change: need complex filter
             # Also implies re-encoding, so we shouldn't have '-c copy' or '-c:a copy' in codec_args ideally.
@@ -412,3 +414,24 @@ def parse_ffmpeg_time_seconds(line: str, parse_time_fn) -> Optional[float]:
         return parse_time_fn(match.group(1))
     except ValueError:
         return None
+
+
+def probe_media_info(path: str, timeout: int) -> dict:
+    """Return raw ffprobe format+stream data for the media info dialog."""
+    result = subprocess.run(
+        _tool_cmd("ffprobe") + [
+            "-v", "error",
+            "-show_entries",
+            "format=filename,format_name,format_long_name,duration,size,bit_rate"
+            ":stream=index,codec_type,codec_name,codec_long_name,profile,"
+            "width,height,pix_fmt,color_range,color_space,color_primaries,"
+            "color_transfer,r_frame_rate,avg_frame_rate,bit_rate,sample_rate,"
+            "channels,channel_layout,sample_fmt,bits_per_raw_sample",
+            "-of", "json",
+            path,
+        ],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip())
+    return json.loads(result.stdout)
