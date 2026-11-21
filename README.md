@@ -17,7 +17,9 @@ Emendo is a lightweight GTK4/libadwaita media exporter for Linux, with the main 
 It provides an interactive interface for trimming, cropping, and re-encoding media files using ffmpeg and GStreamer under the hood.
 
 In order to provide a clean and beautiful interface, it tries to loosely adhere to the GNOME HIG.  
-This is a hobbyist project: I'm not a developer by trade, so don't expect anything too fancy. I mainly write code for fun.
+
+> [!NOTE]
+> Emendo was my first experiment with Python. It was meant to be a fun learning experiment with Python and GTK-4, as back then I had zero experience with both. Your expectations should be in line with that. I'm still very inexperienced with Python, but looking back, Emendo had design decisions that I'd never make nowadays, starting with the huge `emendo.py` monolith. Fixing that would require major refactoring/rewriting, and I'm not interested in doing so. By my current standars, Emendo is bad code; but it works, and that's for now enough for me.
 
 
 ## Why Emendo? There are numerous softwares that does the same.
@@ -77,7 +79,7 @@ Note that every single preset is customizable on-the-fly, so if you want to chan
 Download the latest `Emendo-*.flatpak` file from [Releases](../../releases), then run:
 
 ```bash
-flatpak install --user ./Emendo-1.0.1.flatpak
+flatpak install --user ./Emendo-1.0.2.flatpak
 flatpak run io.github.Gabriel2Silva.Emendo
 ```
 
