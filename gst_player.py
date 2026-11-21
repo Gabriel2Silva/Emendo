@@ -11,6 +11,16 @@ from gi.repository import Gst, GObject, GLib
 
 log = logging.getLogger("Emendo.Player")
 
+# GstPlayFlags.FORCE_SW_DECODERS; not exposed by older gst-python bindings.
+PLAY_FLAG_FORCE_SW_DECODERS = 0x00001000
+
+
+def _force_software_decoder_flags(flags: int, enabled: bool) -> int:
+    if enabled:
+        return flags | PLAY_FLAG_FORCE_SW_DECODERS
+    return flags & ~PLAY_FLAG_FORCE_SW_DECODERS
+
+
 # Ensure GStreamer is initialized
 if not Gst.is_initialized():
     try:
@@ -37,6 +47,8 @@ class GstPlayer(GObject.Object):
         self.watch_id = None
         self._audio_notify_id = None
         self._position_timer_id = None
+        self._force_software_decoders = False
+        self._supports_decoder_flags = True
         self.duration = -1
         self._init_pipeline()
 
@@ -46,11 +58,15 @@ class GstPlayer(GObject.Object):
         factory = Gst.ElementFactory.find("playbin")
         if factory:
             self.pipeline = Gst.ElementFactory.make("playbin", "player")
+            self._supports_decoder_flags = True
         else:
             self.pipeline = Gst.ElementFactory.make("playbin3", "player")
+            self._supports_decoder_flags = False
 
         if not self.pipeline:
             raise RuntimeError("Could not create GStreamer 'playbin' element. Is gstreamer-plugins-base installed?")
+
+        self._apply_force_software_decoders()
 
         # Set up video sink
         # We prefer gtk4paintablesink for GTK4
@@ -83,6 +99,46 @@ class GstPlayer(GObject.Object):
 
         # Periodic position updates
         self._position_timer_id = GLib.timeout_add(50, self._query_position)
+
+    def _apply_force_software_decoders(self):
+        if not self.pipeline or not self._supports_decoder_flags:
+            return
+        flags = self.pipeline.get_property("flags")
+        self.pipeline.set_property(
+            "flags",
+            _force_software_decoder_flags(flags, self._force_software_decoders),
+        )
+
+    def set_force_software_decoders(self, enabled):
+        """Select software decoders for the next source.
+
+        Call before set_uri() so playbin builds its decoder chain with the flag.
+        """
+        enabled = bool(enabled)
+        if enabled == self._force_software_decoders:
+            return
+
+        self._force_software_decoders = enabled
+        if not self._supports_decoder_flags:
+            log.warning("Current pipeline does not support forcing software decoders")
+            return
+
+        if self.pipeline:
+            try:
+                state = self.pipeline.get_state(0).state
+            except Exception:
+                state = Gst.State.NULL
+            if state in (Gst.State.PAUSED, Gst.State.PLAYING):
+                log.warning(
+                    "Decoder mode changed after the pipeline was built; "
+                    "it will apply on the next source"
+                )
+
+        self._apply_force_software_decoders()
+        log.info(
+            "Preview decoder mode: %s",
+            "software" if enabled else "hardware-preferred",
+        )
 
     def get_paintable(self):
         return self.paintable

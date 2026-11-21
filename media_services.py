@@ -182,6 +182,58 @@ def probe_video_metadata(path: str, default_fps: float, timeout: int):
     return duration, width, height, fps
 
 
+def probe_video_frame_durations(path: str, timeout: int) -> bool:
+    """Return True when the first video packets carry a duration.
+
+    Matroska tracks without DefaultDuration expose no packet duration.
+    GStreamer then reports an unknown frame rate, and some hardware
+    decoders drop PTS, which makes playback run at decode speed.
+    """
+    try:
+        result = subprocess.run(
+            _tool_cmd("ffprobe") + [
+                "-v",
+                "error",
+                "-select_streams",
+                "V:0",
+                "-read_intervals",
+                "%+#3",
+                "-show_entries",
+                "format=format_name:packet=duration_time",
+                "-of",
+                "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+    if result.returncode != 0:
+        return True
+
+    try:
+        data = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return True
+
+    format_names = (data.get("format") or {}).get("format_name", "")
+    names = {name.strip() for name in format_names.split(",")}
+    if not names.intersection({"matroska", "webm"}):
+        return True
+
+    packets = data.get("packets") or []
+    if not packets:
+        return True
+
+    return any(
+        isinstance(packet, dict) and packet.get("duration_time")
+        for packet in packets
+    )
+
+
 def probe_audio_tracks(path: str, timeout: int):
     """Return audio track metadata for UI fallback when player discovery is incomplete."""
     result = subprocess.run(

@@ -1,6 +1,7 @@
 # Constants for Emendo application
 APP_NAME = "Emendo"
 APP_ID = "io.github.Gabriel2Silva.Emendo"
+APP_VERSION = "1.0.2"
 
 CROP_MIN_SIZE = 0.05
 CROP_DEFAULT_X = 0.1
@@ -13,6 +14,8 @@ RECT_CACHE_DURATION = 0.1
 SYSTEM_METRICS_UPDATE_INTERVAL = 0.5
 CODEC_CHECK_TIMEOUT = 2
 FFPROBE_TIMEOUT = 10
+# Header-only probe that runs before playback setup; keep it short.
+FRAME_DURATION_PROBE_TIMEOUT = 2
 FFMPEG_PROGRESS_THROTTLE = 0.1
 EXPORT_DIR = "Emendo"
 DEFAULT_WINDOW_WIDTH = 1000

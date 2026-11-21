@@ -546,6 +546,51 @@ class TestOpenDialogLifecycle(unittest.TestCase):
         app._open_file.assert_called_once()
 
 
+class TestOpenFileDecoderMode(unittest.TestCase):
+    def _make_open_app(self):
+        app = type("FakeOpenApp", (), {})()
+        app.filepath = None
+        app._fallback_audio_tracks = []
+        app._metadata_request_id = 0
+        app._show_loading = MagicMock()
+        app._hide_loading = MagicMock()
+        app._report_error = MagicMock()
+        app._report_unexpected = MagicMock()
+        app.player = MagicMock()
+        app._update_player_source = MagicMock()
+        app._load_video_metadata_async = MagicMock()
+        return app
+
+    def test_sets_decoder_mode_before_loading_source(self):
+        app = self._make_open_app()
+        calls = []
+        app.player.set_force_software_decoders.side_effect = (
+            lambda enabled: calls.append(("decoder", enabled))
+        )
+        app._update_player_source.side_effect = (
+            lambda path: calls.append(("source", path))
+        )
+
+        with patch("emendo.probe_video_frame_durations", return_value=False):
+            emendo.EmendoApp._open_file(app, "/tmp/double.mkv")
+
+        self.assertEqual(
+            calls,
+            [("decoder", True), ("source", "/tmp/double.mkv")],
+        )
+        app._load_video_metadata_async.assert_called_once_with(
+            "/tmp/double.mkv", 1
+        )
+
+    def test_uses_hardware_decoding_when_durations_are_present(self):
+        app = self._make_open_app()
+
+        with patch("emendo.probe_video_frame_durations", return_value=True):
+            emendo.EmendoApp._open_file(app, "/tmp/normal.mkv")
+
+        app.player.set_force_software_decoders.assert_called_once_with(False)
+
+
 class TestExportDialogLifecycle(unittest.TestCase):
     def test_dismiss_export_dialog_closes_presented_dialog_once(self):
         app = type("FakeExportDialogApp", (), {})()

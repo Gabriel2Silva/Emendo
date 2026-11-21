@@ -10,4 +10,11 @@
   </description>
   <launchable type="desktop-id">io.github.Gabriel2Silva.Emendo.desktop</launchable>
   <url type="homepage">https://github.com/Gabriel2Silva/Emendo</url>
+  <releases>
+    <release version="1.0.2" date="2026-11-21">
+      <description>
+        <p>Fix preview playback of Matroska files without frame durations.</p>
+      </description>
+    </release>
+  </releases>
 </component>

@@ -72,8 +72,9 @@ from gi.repository import Gtk, Gst, Adw, Gdk, Graphene, GLib, Gio, GObject, Pang
 
 from constants import (
     CROP_MIN_SIZE, CROP_DEFAULT_X, CROP_DEFAULT_Y, CROP_DEFAULT_W, CROP_DEFAULT_H,
-    APP_ID, APP_NAME, DEFAULT_FPS, CROP_REDRAW_THROTTLE, RECT_CACHE_DURATION,
+    APP_ID, APP_NAME, APP_VERSION, DEFAULT_FPS, CROP_REDRAW_THROTTLE, RECT_CACHE_DURATION,
     SYSTEM_METRICS_UPDATE_INTERVAL, CODEC_CHECK_TIMEOUT, FFPROBE_TIMEOUT, FFMPEG_PROGRESS_THROTTLE,
+    FRAME_DURATION_PROBE_TIMEOUT,
     EXPORT_DIR, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, CODEC_CONFIGS, AUDIO_CONFIGS, AUDIO_CONTAINER_COMPAT, AUDIO_CONTAINER_WARN, CONTAINER_EXTS, CONTAINER_NAMES
 )
 from exceptions import VideoLoadError
@@ -81,6 +82,7 @@ from utils import seconds_to_hmsms, hmsms_to_seconds, _show_error, _show_confirm
 from media_services import (
     check_encoder_available,
     probe_video_metadata,
+    probe_video_frame_durations,
     probe_audio_tracks,
     probe_media_info,
     get_codec_info,
@@ -1447,7 +1449,7 @@ window .themeselector checkbutton.theme-selector radio:checked {
             transient_for=self.win,
             application_name=APP_NAME,
             application_icon=APP_ID,
-            version="1.0.1",
+            version=APP_VERSION,
             website="https://github.com/Gabriel2Silva/Emendo",
         )
         about.set_comments("Media Exporter for trim, crop, and codec conversion workflows.")
@@ -2352,6 +2354,21 @@ window .themeselector checkbutton.theme-selector radio:checked {
 
         # Show loading state
         self._show_loading("Loading video...")
+
+        # Decoder mode must be chosen before playbin prerolls the new source.
+        try:
+            has_frame_durations = probe_video_frame_durations(
+                self.filepath, FRAME_DURATION_PROBE_TIMEOUT
+            )
+        except Exception:
+            log.exception("Frame duration probe failed; keeping hardware decoding")
+            has_frame_durations = True
+        if not has_frame_durations:
+            log.info("Source has no frame durations; preferring software decoders for preview")
+        try:
+            self.player.set_force_software_decoders(not has_frame_durations)
+        except Exception:
+            log.exception("Failed to configure preview decoder mode")
 
         try:
             self._update_player_source(self.filepath)

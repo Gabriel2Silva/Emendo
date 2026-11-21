@@ -1,6 +1,7 @@
 import unittest
 import sys
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 # Mock 'gi' module before importing utils
@@ -15,6 +16,7 @@ import media_services
 from media_services import (
     parse_ffmpeg_time_seconds,
     probe_video_metadata,
+    probe_video_frame_durations,
     probe_audio_tracks,
     format_elapsed_time,
     get_cpu_temperature,
@@ -117,6 +119,68 @@ class TestVideoProbing(unittest.TestCase):
         self.assertIn("Main Mix", tracks[0]["label"])
         self.assertIn("eng", tracks[0]["label"])
         self.assertEqual(tracks[1]["index"], 1)
+
+class TestFrameDurationProbe(unittest.TestCase):
+    def _mock_probe(self, mock_run, payload, returncode=0):
+        process = MagicMock()
+        process.returncode = returncode
+        process.stdout = json.dumps(payload)
+        mock_run.return_value = process
+
+    @patch('subprocess.run')
+    def test_matroska_without_packet_durations(self, mock_run):
+        self._mock_probe(mock_run, {
+            "format": {"format_name": "matroska,webm"},
+            "packets": [{}, {}, {}],
+        })
+
+        self.assertFalse(probe_video_frame_durations("dummy.mkv", 5))
+        command = mock_run.call_args[0][0]
+        self.assertIn("-read_intervals", command)
+        self.assertIn("V:0", command)
+
+    @patch('subprocess.run')
+    def test_matroska_with_packet_durations(self, mock_run):
+        self._mock_probe(mock_run, {
+            "format": {"format_name": "matroska,webm"},
+            "packets": [
+                {"duration_time": "0.017000"},
+                {"duration_time": "0.017000"},
+            ],
+        })
+
+        self.assertTrue(probe_video_frame_durations("dummy.mkv", 5))
+
+    @patch('subprocess.run')
+    def test_non_matroska_packets_without_durations_are_not_flagged(self, mock_run):
+        self._mock_probe(mock_run, {
+            "format": {"format_name": "mpegts"},
+            "packets": [{}, {}, {}],
+        })
+
+        self.assertTrue(probe_video_frame_durations("dummy.ts", 5))
+
+    @patch('subprocess.run')
+    def test_ffprobe_failure_is_not_flagged(self, mock_run):
+        self._mock_probe(mock_run, {}, returncode=1)
+
+        self.assertTrue(probe_video_frame_durations("dummy.mkv", 5))
+
+    @patch('subprocess.run')
+    def test_ffprobe_timeout_is_not_flagged(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired("ffprobe", 5)
+
+        self.assertTrue(probe_video_frame_durations("dummy.mkv", 5))
+
+    @patch('subprocess.run')
+    def test_empty_packet_list_is_not_flagged(self, mock_run):
+        self._mock_probe(mock_run, {
+            "format": {"format_name": "matroska,webm"},
+            "packets": [],
+        })
+
+        self.assertTrue(probe_video_frame_durations("dummy.mkv", 5))
+
 
 class TestFFmpegCommandBuilder(unittest.TestCase):
     def test_build_ffmpeg_command_audio_config_none_keeps_default_audio(self):
